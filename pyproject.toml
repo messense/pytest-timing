@@ -1,0 +1,67 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pytest-timing"
+version = "0.1.0"
+description = "Record test timings under pytest-xdist and render cargo-style timing reports (ASCII Gantt and HTML)."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "messense", email = "messense@icloud.com" }]
+keywords = ["pytest", "xdist", "timing", "gantt", "profiling"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Framework :: Pytest",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Testing",
+]
+dependencies = ["pytest>=7.3"]
+
+[project.optional-dependencies]
+xdist = ["pytest-xdist>=3.0"]
+
+[project.urls]
+Homepage = "https://github.com/messense/pytest-timing"
+
+[project.entry-points.pytest11]
+timing = "pytest_timing.plugin"
+
+[project.scripts]
+pytest-timing = "pytest_timing.cli:main"
+
+[dependency-groups]
+dev = [
+  "pytest-xdist>=3.0",
+  "pytest-rerunfailures>=12",
+  "hypothesis>=6",
+  "ruff>=0.6",
+  "mypy>=1.10",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pytest_timing"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p pytester"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+
+[tool.mypy]
+strict = true
+python_version = "3.10"
+files = ["src"]

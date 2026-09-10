@@ -1,0 +1,90 @@
+{
+ "schema": 1,
+ "pytest_timing_version": "0.1.0",
+ "run": {
+  "start": 1700000000.0,
+  "stop": 1700000003.0,
+  "argv": [
+   "pytest",
+   "-n",
+   "2"
+  ],
+  "rootdir": "/repo",
+  "python": "3.12.0",
+  "pytest": "8.0.0",
+  "xdist": "3.6.0",
+  "dist": "load",
+  "numprocesses": 2,
+  "complete": false
+ },
+ "workers": [
+  {
+   "id": "gw0",
+   "ready": 0.2,
+   "collected": 0.5,
+   "items": 2,
+   "down": 2.4,
+   "error": null
+  },
+  {
+   "id": "gw1",
+   "ready": 0.25,
+   "collected": 0.55,
+   "items": 2,
+   "down": 2.9,
+   "error": null
+  }
+ ],
+ "tests": [
+  {
+   "nodeid": "tests/test_a.py::test_one",
+   "worker": "gw0",
+   "attempt": 0,
+   "outcome": "passed",
+   "start": 0.6,
+   "stop": 1.3,
+   "phases": {
+    "setup": [
+     0.6,
+     0.7,
+     0.1
+    ],
+    "call": [
+     0.7,
+     1.2,
+     0.5
+    ],
+    "teardown": [
+     1.2,
+     1.3,
+     0.1
+    ]
+   }
+  },
+  {
+   "nodeid": "tests/test_a.py::test_two",
+   "worker": "gw1",
+   "attempt": 0,
+   "outcome": "failed",
+   "start": 0.6,
+   "stop": 2.0,
+   "phases": {
+    "setup": [
+     0.6,
+     0.7,
+     0.1
+    ],
+    "call": [
+     0.7,
+     1.9,
+     1.2
+    ],
+    "teardown": [
+     1.9,
+     2.0,
+     0.1
+    ]
+   }
+  }
+ ]
+}

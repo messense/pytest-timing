@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pytest-timing report</title>
+<style>
+:root {
+  --bg: #ffffff;
+  --fg: #1a1a1a;
+  --muted: #666;
+  --border: #d0d0d0;
+  --row-alt: #f4f4f4;
+  --link: #0b5fa5;
+  --canvas-background: #f7f7f7;
+  --canvas-grid: #e6e6e6;
+  --canvas-axes: #303030;
+  --canvas-text: #303030;
+  --canvas-base: #95cce8;
+  --canvas-setup: #f0b165;
+  --canvas-teardown: #aa95e8;
+  --canvas-boot: #c9c9c9;
+  --canvas-collect: #95e8aa;
+  --canvas-merged: #b8c8d2;
+  --canvas-skipped: #dcdcdc;
+  --canvas-bad: #d43f3a;
+  --canvas-xpass: #d4a017;
+  --canvas-active: #2e9e3e;
+  --canvas-booting: #8a8a8a;
+  --canvas-collecting: #3a7bd5;
+  --canvas-rate: rgba(250, 119, 0, 0.12);
+  --canvas-rate-line: #fa7700;
+  --canvas-hl: #000;
+  --tooltip-bg: #fffbe6;
+  --tooltip-border: #c9b76a;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17191c;
+    --fg: #e8e8e8;
+    --muted: #9a9a9a;
+    --border: #3a3d42;
+    --row-alt: #1f2226;
+    --link: #6fb3ff;
+    --canvas-background: #1e2126;
+    --canvas-grid: #2c3037;
+    --canvas-axes: #cfd3d8;
+    --canvas-text: #cfd3d8;
+    --canvas-base: #4f8fb8;
+    --canvas-setup: #c48a3f;
+    --canvas-teardown: #7f6bc4;
+    --canvas-boot: #4a4a4a;
+    --canvas-collect: #3f8f56;
+    --canvas-merged: #4b5a66;
+    --canvas-skipped: #3c3c3c;
+    --canvas-bad: #ff6b66;
+    --canvas-xpass: #e0b535;
+    --canvas-active: #5ad06a;
+    --canvas-booting: #a0a0a0;
+    --canvas-collecting: #6fa4ff;
+    --canvas-rate: rgba(250, 119, 0, 0.16);
+    --canvas-rate-line: #ff9a3c;
+    --canvas-hl: #fff;
+    --tooltip-bg: #2a2d33;
+    --tooltip-border: #5a5f68;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 16px 24px 48px;
+  font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: var(--fg); background: var(--bg);
+}
+h1 { font-size: 22px; margin: 0 0 12px; }
+h2 { font-size: 16px; margin: 28px 0 8px; }
+.muted { color: var(--muted); }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+table.summary { border-collapse: collapse; margin-bottom: 8px; }
+table.summary td { padding: 3px 12px 3px 0; vertical-align: top; }
+table.summary td:first-child { font-weight: 600; white-space: nowrap; }
+.error-text { color: var(--canvas-bad); }
+.controls {
+  display: flex; flex-wrap: wrap; gap: 12px 28px; align-items: center;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; margin: 8px 0 12px;
+}
+.controls label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.controls input[type=range] { width: 160px; }
+.controls input[type=text], .controls input[type=number] {
+  font: inherit; padding: 2px 6px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--bg); color: var(--fg);
+}
+.controls input[type=number] { width: 64px; }
+.controls .group { display: inline-flex; gap: 10px; align-items: center; }
+.chart-wrap {
+  overflow-x: auto; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--canvas-background); position: relative;
+}
+.chart-wrap svg { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 6px 0 0; font-size: 12px; }
+.legend span { display: inline-flex; align-items: center; gap: 5px; }
+.legend i { display: inline-block; width: 14px; height: 10px; border: 1px solid var(--border); }
+.bar { cursor: pointer; }
+.bar.dim { opacity: 0.25; }
+.bar.hl rect.base { stroke: var(--canvas-hl); stroke-width: 2; }
+rect.base { fill: var(--canvas-base); stroke: none; }
+rect.ph-setup { fill: var(--canvas-setup); }
+rect.ph-teardown { fill: var(--canvas-teardown); }
+rect.ph-call { fill: var(--canvas-base); }
+.bar.bad rect.base { stroke: var(--canvas-bad); stroke-width: 1.5; }
+.bar.xpassed rect.base { stroke: var(--canvas-xpass); stroke-width: 1.5; }
+.bar.skip rect.base { fill: var(--canvas-skipped); stroke: var(--muted); stroke-dasharray: 2 2; }
+.bar.skip rect.ph-setup, .bar.skip rect.ph-teardown { opacity: 0.55; }
+.bar.merged rect.base { fill: var(--canvas-merged); }
+.bar.merged text { fill: var(--canvas-text); pointer-events: none; }
+.band-boot { fill: url(#hatch-boot); }
+.band-collect { fill: url(#hatch-collect); }
+.axis { stroke: var(--canvas-axes); }
+.grid { stroke: var(--canvas-grid); }
+.lbl { fill: var(--canvas-text); }
+.down-mark { stroke: var(--canvas-axes); stroke-width: 1.5; }
+.down-err { stroke: var(--canvas-bad); stroke-width: 2; }
+#tooltip {
+  position: fixed; z-index: 10; pointer-events: none; display: none;
+  max-width: 560px; padding: 8px 10px; font-size: 12px; line-height: 1.35;
+  background: var(--tooltip-bg); color: var(--fg); border: 1px solid var(--tooltip-border);
+  border-radius: 5px; box-shadow: 0 2px 8px rgba(0,0,0,0.25); word-break: break-all;
+}
+#tooltip b { font-weight: 600; }
+#tooltip table { border-collapse: collapse; margin-top: 4px; }
+#tooltip td { padding: 0 8px 0 0; }
+table.tests { border-collapse: collapse; width: 100%; font-size: 13px; }
+table.tests th, table.tests td { padding: 4px 8px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+table.tests th { cursor: pointer; user-select: none; position: sticky; top: 0; background: var(--bg); }
+table.tests th.sorted::after { content: " \25BE"; }
+table.tests th.sorted.asc::after { content: " \25B4"; }
+table.tests tbody tr:nth-child(even) { background: var(--row-alt); }
+table.tests td.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.tests td.nodeid { white-space: normal; word-break: break-all; }
+table.tests td.o-failed, table.tests td.o-error, table.tests td.o-crashed, table.tests td.o-rerun { color: var(--canvas-bad); font-weight: 600; }
+table.tests td.o-xpassed { color: var(--canvas-xpass); }
+table.tests td.o-skipped, table.tests td.o-xfailed { color: var(--muted); }
+.empty { padding: 24px; text-align: center; color: var(--muted); }
+button { font: inherit; padding: 2px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--fg); cursor: pointer; }
+button.on { background: var(--link); color: #fff; border-color: var(--link); }
+</style>
+</head>
+<body>
+<h1>pytest-timing report</h1>
+<table class="summary" id="summary"></table>
+
+<div class="controls">
+  <label>Min test time: <input type="range" id="min-unit-time" min="0" max="30" step="0.05" value="0"> <output id="min-unit-time-output">0s</output></label>
+  <label>Scale: <input type="range" id="scale" min="1" max="100" step="1" value="1"> <output id="scale-output"></output></label>
+  <span class="group">
+    <button id="view-lane" class="on">Lanes</button>
+    <button id="view-unit">Units</button>
+    <label>top <input type="number" id="top-n" min="1" max="5000" value="50"></label>
+  </span>
+  <span class="group" id="outcome-filters"></span>
+  <label>Filter: <input type="text" id="text-filter" placeholder="nodeid substring" size="28"></label>
+</div>
+
+<h2 id="pipeline-title">Worker lanes</h2>
+<div class="chart-wrap" id="pipeline-container"></div>
+<div class="legend" id="pipeline-legend"></div>
+
+<h2>Concurrency</h2>
+<div class="chart-wrap" id="timing-container"></div>
+<div class="legend">
+  <span><i style="background:var(--canvas-active)"></i>Active workers</span>
+  <span><i style="background:var(--canvas-collecting)"></i>Collecting</span>
+  <span><i style="background:var(--canvas-booting)"></i>Booting</span>
+  <span><i style="background:var(--canvas-rate)"></i>Tests completed / s</span>
+</div>
+
+<h2>Tests <span class="muted" id="table-note"></span></h2>
+<div style="overflow-x:auto"><table class="tests" id="tests-table"><thead></thead><tbody></tbody></table></div>
+
+<div id="tooltip"></div>
+<canvas id="measure" width="1" height="1" style="display:none"></canvas>
+<script id="pytest-timing-data" type="application/json">__PYTEST_TIMING_DATA__</script>
+<script>
+(function () {
+  'use strict';
+  try {
+  var DATA = JSON.parse(document.getElementById('pytest-timing-data').textContent);
+  var RUN = DATA.run || {};
+  var WORKERS = DATA.workers || [];
+  var TESTS = DATA.tests || [];
+  var PHASES = ['setup', 'call', 'teardown'];
+  // Outcome semantics come from the model (pytest_timing.model.OUTCOME_REGISTRY).
+  var OUTCOME_INFO = DATA.outcomes || {};
+  var OUTCOMES = Object.keys(OUTCOME_INFO);
+  var BAD = {};
+  OUTCOMES.forEach(function (o) { if (OUTCOME_INFO[o].is_failure) BAD[o] = 1; });
+  TESTS.forEach(function (t) { if (OUTCOMES.indexOf(t.outcome) < 0) OUTCOMES.push(t.outcome); });
+  // Iterative extrema: spreading a huge array into Math.max overflows the argument limit.
+  function maxOf(arr, f, init) { var m = init === undefined ? -Infinity : init; for (var i = 0; i < arr.length; i++) { var v = f ? f(arr[i]) : arr[i]; if (v > m) m = v; } return m; }
+  function minOf(arr, f, init) { var m = init === undefined ? Infinity : init; for (var i = 0; i < arr.length; i++) { var v = f ? f(arr[i]) : arr[i]; if (v < m) m = v; } return m; }
+  var BOX_HEIGHT = 26, BAR_H = 20, LEFT_PAD = 8, RIGHT_PAD = 24, TOP_PAD = 24, BOTTOM_PAD = 22;
+  var TABLE_CAP = 2000;
+
+  // ---- data prep -------------------------------------------------------------------
+  var moduleIndex = {}, modules = [];
+  TESTS.forEach(function (t, i) {
+    t.i = i;
+    t.dur = t.stop - t.start;
+    t.module = t.nodeid.split('::')[0];
+    if (!(t.module in moduleIndex)) { moduleIndex[t.module] = modules.length; modules.push(t.module); }
+    t.m = moduleIndex[t.module];
+    t.ph = {};
+    PHASES.forEach(function (p) { var v = t.phases && t.phases[p]; if (v) t.ph[p] = { start: v[0], stop: v[1], dur: v[2] }; });
+  });
+  var laneIds = WORKERS.map(function (w) { return w.id; }), laneIndex = {};
+  laneIds.forEach(function (id, i) { laneIndex[id] = i; });
+  TESTS.forEach(function (t) { if (!(t.worker in laneIndex)) { laneIndex[t.worker] = laneIds.length; laneIds.push(t.worker); } });
+  var workerById = {};
+  WORKERS.forEach(function (w) { workerById[w.id] = w; });
+  // Orderings computed once; filters preserve them, so renders never sort the full list.
+  var TESTS_BY_START = TESTS.slice().sort(function (a, b) { return a.start - b.start || a.stop - b.stop; });
+  var TESTS_BY_DUR = TESTS.slice().sort(function (a, b) { return b.dur - a.dur || a.i - b.i; });
+  var SUMMARY = DATA.summary || { wall: 0, busy: 0, utilisation: 0, lanes: [] };
+  function events(intervals) {
+    var ev = [];
+    intervals.forEach(function (iv) { ev.push([iv[0], 1]); ev.push([iv[1], -1]); });
+    return ev.sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
+  }
+  var ACTIVE_EVENTS = events(TESTS.map(function (t) { return [t.start, t.stop]; }));
+  var BOOT_EVENTS = events(WORKERS.filter(function (w) { return w.ready != null && w.start != null && w.ready > w.start; }).map(function (w) { return [w.start, w.ready]; }));
+  var COLLECT_EVENTS = events(WORKERS.filter(function (w) { return w.ready != null && w.collected != null && w.collected > w.ready; }).map(function (w) { return [w.ready, w.collected]; }));
+  var WALL = Math.max(0, (RUN.stop || 0) - (RUN.start || 0));
+  WORKERS.forEach(function (w) { ['ready', 'collected', 'down'].forEach(function (k) { if (w[k] != null) WALL = Math.max(WALL, w[k]); }); });
+  TESTS.forEach(function (t) { WALL = Math.max(WALL, t.stop); });
+  if (WALL <= 0) WALL = 1;
+  var maxDur = 0;
+  TESTS.forEach(function (t) { if (t.dur > maxDur) maxDur = t.dur; });
+
+  var state = { minTime: 0, pxPerSec: 100, view: 'lane', topN: 50, outcomes: {}, text: '', pinned: null, sortKey: 'dur', sortDir: -1 };
+  OUTCOMES.forEach(function (o) { state.outcomes[o] = true; });
+
+  // ---- helpers ---------------------------------------------------------------------
+  function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+  function fmt(s) {
+    if (s == null || isNaN(s)) return '-';
+    if (s >= 60) { var m = Math.floor(s / 60); return m + 'm ' + (s - m * 60).toFixed(1) + 's'; }
+    if (s >= 1) return s.toFixed(2) + 's';
+    if (s >= 0.001) return (s * 1000).toFixed(1) + 'ms';
+    return (s * 1e6).toFixed(0) + 'µs';
+  }
+  function pct(part, total) { return total > 0 ? ' (' + Math.round(part / total * 100) + '%)' : ''; }
+  function fmtDate(epoch) { try { return new Date(epoch * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z'); } catch (e) { return '-'; } }
+  var mctx = document.getElementById('measure').getContext('2d');
+  mctx.font = '11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+  function textWidth(s) { return mctx.measureText(s).width; }
+  function niceStep(pxPerSec, minPx) {
+    var steps = [0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600];
+    for (var i = 0; i < steps.length; i++) if (steps[i] * pxPerSec >= minPx) return steps[i];
+    return steps[steps.length - 1];
+  }
+  function tickLabel(s) { return s >= 60 ? (s / 60).toFixed(s % 60 ? 1 : 0) + 'm' : (s < 1 ? (s * 1000).toFixed(0) + 'ms' : s + 's'); }
+
+  function filteredTests() {
+    var q = state.text.toLowerCase();
+    return TESTS.filter(function (t) {
+      return t.dur >= state.minTime && state.outcomes[t.outcome] !== false && (!q || t.nodeid.toLowerCase().indexOf(q) >= 0);
+    });
+  }
+  function barClass(t) {
+    var c = 'bar';
+    if (BAD[t.outcome]) c += ' bad';
+    else if (t.outcome === 'skipped' || t.outcome === 'xfailed') c += ' skip';
+    else if (t.outcome === 'xpassed') c += ' xpassed';
+    return c;
+  }
+  function axisSvg(x0, width, height, pxPerSec) {
+    var step = niceStep(pxPerSec, 70), out = [];
+    for (var s = 0; s <= WALL + 1e-9; s += step) {
+      var x = x0 + s * pxPerSec;
+      out.push('<line class="grid" x1="' + x.toFixed(1) + '" y1="' + TOP_PAD + '" x2="' + x.toFixed(1) + '" y2="' + (height - BOTTOM_PAD) + '"/>');
+      out.push('<text class="lbl" x="' + x.toFixed(1) + '" y="' + (height - 6) + '" text-anchor="middle">' + tickLabel(+s.toFixed(6)) + '</text>');
+    }
+    out.push('<line class="axis" x1="' + x0 + '" y1="' + (height - BOTTOM_PAD) + '" x2="' + (x0 + width) + '" y2="' + (height - BOTTOM_PAD) + '"/>');
+    out.push('<line class="axis" x1="' + x0 + '" y1="' + TOP_PAD + '" x2="' + x0 + '" y2="' + (height - BOTTOM_PAD) + '"/>');
+    return out.join('');
+  }
+  var DEFS = '<defs>' +
+    '<pattern id="hatch-boot" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="var(--canvas-background)"/><line x1="0" y1="0" x2="0" y2="6" stroke="var(--canvas-boot)" stroke-width="2"/></pattern>' +
+    '<pattern id="hatch-collect" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)"><rect width="6" height="6" fill="var(--canvas-background)"/><line x1="0" y1="0" x2="0" y2="6" stroke="var(--canvas-collect)" stroke-width="2"/></pattern>' +
+    '</defs>';
+
+  // Draw one test span as a bar group. Returns SVG string.
+  function testBar(t, x0, y, pxPerSec, minPx) {
+    var x = x0 + t.start * pxPerSec, w = Math.max(minPx, t.dur * pxPerSec);
+    var s = '<g class="' + barClass(t) + '" data-i="' + t.i + '" data-m="' + t.m + '">';
+    s += '<rect class="base" x="' + x.toFixed(2) + '" y="' + y + '" width="' + w.toFixed(2) + '" height="' + BAR_H + '" rx="2"/>';
+    if (w >= 2) {
+      ['setup', 'teardown'].forEach(function (p) {
+        var ph = t.ph[p]; if (!ph) return;
+        var px = x0 + ph.start * pxPerSec, pw = ph.dur * pxPerSec;
+        if (pw < 0.5) return;
+        s += '<rect class="ph-' + p + '" x="' + px.toFixed(2) + '" y="' + (y + 2) + '" width="' + pw.toFixed(2) + '" height="' + (BAR_H - 4) + '"/>';
+      });
+    }
+    return s + '</g>';
+  }
+  // Merge sub-pixel spans into aggregate bars. Returns array of {merged:true, tests:[..], start, stop} or a test.
+  function clusterLane(spans, pxPerSec) {
+    var out = [], cur = null;
+    spans.forEach(function (t) {
+      var small = t.dur * pxPerSec < 1;
+      if (small && cur && (t.start - cur.stop) * pxPerSec <= 1) {
+        cur.tests.push(t); cur.stop = Math.max(cur.stop, t.stop); return;
+      }
+      if (cur) { out.push(cur); cur = null; }
+      if (small) cur = { merged: true, tests: [t], start: t.start, stop: t.stop };
+      else out.push(t);
+    });
+    if (cur) out.push(cur);
+    return out.map(function (c) { return (c.merged && c.tests.length === 1) ? c.tests[0] : c; });
+  }
+  var clusters = [];
+  function mergedBar(c, x0, y, pxPerSec) {
+    var id = clusters.length; clusters.push(c);
+    var x = x0 + c.start * pxPerSec, w = Math.max(3, (c.stop - c.start) * pxPerSec);
+    var bad = c.tests.some(function (t) { return BAD[t.outcome]; });
+    var s = '<g class="bar merged' + (bad ? ' bad' : '') + '" data-c="' + id + '">';
+    s += '<rect class="base" x="' + x.toFixed(2) + '" y="' + y + '" width="' + w.toFixed(2) + '" height="' + BAR_H + '" rx="2"/>';
+    var label = '×' + c.tests.length;
+    if (w > textWidth(label) + 4) s += '<text x="' + (x + w / 2).toFixed(1) + '" y="' + (y + BAR_H / 2 + 4) + '" text-anchor="middle">' + label + '</text>';
+    return s + '</g>';
+  }
+
+  // ---- pipeline: lane view -----------------------------------------------------------
+  function renderLanes(tests) {
+    clusters = [];
+    var byLane = {}; laneIds.forEach(function (id) { byLane[id] = []; });
+    var allowed = new Set(tests);
+    TESTS_BY_START.forEach(function (t) { if (allowed.has(t)) byLane[t.worker].push(t); });
+    var labelW = 0; laneIds.forEach(function (id) { labelW = Math.max(labelW, textWidth(id)); });
+    var x0 = LEFT_PAD + labelW + 10, pxPerSec = state.pxPerSec;
+    var width = Math.ceil(WALL * pxPerSec), height = TOP_PAD + laneIds.length * BOX_HEIGHT + BOTTOM_PAD;
+    var svg = ['<svg width="' + (x0 + width + RIGHT_PAD) + '" height="' + height + '">', DEFS];
+    svg.push(axisSvg(x0, width, height, pxPerSec));
+    laneIds.forEach(function (id, row) {
+      var y = TOP_PAD + row * BOX_HEIGHT, by = y + (BOX_HEIGHT - BAR_H) / 2, w = workerById[id];
+      svg.push('<text class="lbl" x="' + LEFT_PAD + '" y="' + (y + BOX_HEIGHT / 2 + 4) + '">' + esc(id) + '</text>');
+      if (w) {
+        var end = w.down != null ? w.down : WALL;
+        if (w.ready != null && w.ready > 0)
+          if (w.start != null) svg.push('<rect class="band-boot" x="' + (x0 + w.start * pxPerSec).toFixed(2) + '" y="' + by + '" width="' + ((w.ready - w.start) * pxPerSec).toFixed(2) + '" height="' + BAR_H + '"><title>' + esc(id) + ' booting: ' + fmt(w.ready - w.start) + '</title></rect>');
+        if (w.ready != null && w.collected != null && w.collected > w.ready)
+          svg.push('<rect class="band-collect" x="' + (x0 + w.ready * pxPerSec).toFixed(2) + '" y="' + by + '" width="' + ((w.collected - w.ready) * pxPerSec).toFixed(2) + '" height="' + BAR_H + '"><title>' + esc(id) + ' collecting: ' + fmt(w.collected - w.ready) + (w.items != null ? ' (' + w.items + ' items)' : '') + '</title></rect>');
+        if (w.down != null) {
+          var dx = (x0 + end * pxPerSec).toFixed(2);
+          svg.push('<line class="' + (w.error ? 'down-err' : 'down-mark') + '" x1="' + dx + '" y1="' + by + '" x2="' + dx + '" y2="' + (by + BAR_H) + '"><title>' + esc(id) + (w.error ? ' crashed: ' + esc(w.error) : ' shutdown') + ' at ' + fmt(w.down) + '</title></line>');
+        }
+      }
+      var spans = byLane[id];
+      clusterLane(spans, pxPerSec).forEach(function (c) {
+        svg.push(c.merged ? mergedBar(c, x0, by, pxPerSec) : testBar(c, x0, by, pxPerSec, 1));
+      });
+    });
+    svg.push('</svg>');
+    return svg.join('');
+  }
+
+  // ---- pipeline: unit view -----------------------------------------------------------
+  function renderUnits(tests) {
+    clusters = [];
+    var allowed = new Set(tests), top = [];
+    for (var k = 0; k < TESTS_BY_DUR.length && top.length < state.topN; k++) if (allowed.has(TESTS_BY_DUR[k])) top.push(TESTS_BY_DUR[k]);
+    top.sort(function (a, b) { return a.start - b.start; });
+    var pxPerSec = state.pxPerSec;
+    var numW = textWidth(String(top.length)) + 6, x0 = LEFT_PAD + numW + 6;
+    var width = Math.ceil(WALL * pxPerSec), height = TOP_PAD + top.length * BOX_HEIGHT + BOTTOM_PAD;
+    var labelMax = 0;
+    var labels = top.map(function (t) { var l = t.nodeid + ' (' + t.worker + '): ' + fmt(t.dur); labelMax = Math.max(labelMax, textWidth(l) + (t.start + t.dur) * pxPerSec); return l; });
+    var totalW = Math.max(width, Math.ceil(labelMax)) + RIGHT_PAD;
+    var svg = ['<svg width="' + (x0 + totalW) + '" height="' + height + '">', DEFS, axisSvg(x0, width, height, pxPerSec)];
+    top.forEach(function (t, row) {
+      var y = TOP_PAD + row * BOX_HEIGHT, by = y + (BOX_HEIGHT - BAR_H) / 2;
+      svg.push('<text class="lbl" x="' + (LEFT_PAD + numW) + '" y="' + (y + BOX_HEIGHT / 2 + 4) + '" text-anchor="end">' + (row + 1) + '</text>');
+      svg.push(testBar(t, x0, by, pxPerSec, 2));
+      svg.push('<text class="lbl" x="' + (x0 + t.stop * pxPerSec + 5).toFixed(1) + '" y="' + (y + BOX_HEIGHT / 2 + 4) + '">' + esc(labels[row]) + '</text>');
+    });
+    svg.push('</svg>');
+    return svg.join('');
+  }
+
+  function renderPipeline() {
+    var c = document.getElementById('pipeline-container'), tests = filteredTests();
+    document.getElementById('pipeline-title').textContent = state.view === 'lane' ? 'Worker lanes' : 'Slowest tests (top ' + state.topN + ')';
+    if (!TESTS.length && !laneIds.length) { c.innerHTML = '<div class="empty">No tests recorded.</div>'; return; }
+    if (!tests.length && state.view === 'unit') { c.innerHTML = '<div class="empty">No tests match the current filters.</div>'; return; }
+    c.innerHTML = state.view === 'lane' ? renderLanes(tests) : renderUnits(tests);
+    applyPin();
+    var lg = document.getElementById('pipeline-legend');
+    lg.innerHTML = '<span><i style="background:var(--canvas-base)"></i>call</span>' +
+      '<span><i style="background:var(--canvas-setup)"></i>setup</span>' +
+      '<span><i style="background:var(--canvas-teardown)"></i>teardown</span>' +
+      '<span><i style="border-color:var(--canvas-bad);border-width:2px"></i>failed / error / crashed / rerun</span>' +
+      '<span><i style="background:var(--canvas-skipped);border-style:dashed"></i>skipped / xfailed</span>' +
+      (state.view === 'lane' ? '<span><i style="background:repeating-linear-gradient(45deg,var(--canvas-boot) 0 2px,transparent 2px 5px)"></i>booting</span>' +
+        '<span><i style="background:repeating-linear-gradient(-45deg,var(--canvas-collect) 0 2px,transparent 2px 5px)"></i>collecting</span>' +
+        '<span><i style="background:var(--canvas-merged)"></i>merged tiny tests (×N)</span>' : '') +
+      '<span class="muted">hover for details, click to pin a module</span>';
+  }
+
+  // ---- concurrency ----------------------------------------------------------------
+  function renderConcurrency() {
+    var c = document.getElementById('timing-container');
+    if (!TESTS.length && !WORKERS.length) { c.innerHTML = '<div class="empty">No data.</div>'; return; }
+    var pxPerSec = state.pxPerSec, H = 220, plotH = H - TOP_PAD - BOTTOM_PAD;
+    var labelW = textWidth('000') + 8, x0 = LEFT_PAD + labelW, width = Math.ceil(WALL * pxPerSec);
+    var cols = Math.max(1, width);
+    // Event sweep sampled per pixel column over a pre-sorted event list.
+    function sample(ev) {
+      var res = new Array(cols), cur = 0, k = 0, peak = 0;
+      for (var col = 0; col < cols; col++) {
+        var t = (col + 1) / pxPerSec, mx = cur;
+        while (k < ev.length && ev[k][0] <= t) { cur += ev[k][1]; if (cur > mx) mx = cur; k++; }
+        res[col] = mx; if (mx > peak) peak = mx;
+      }
+      return { v: res, peak: peak };
+    }
+    var active = sample(ACTIVE_EVENTS), booting = sample(BOOT_EVENTS), collecting = sample(COLLECT_EVENTS);
+    var peak = Math.max(1, active.peak, booting.peak, collecting.peak, laneIds.length);
+    // Tests completed per second: buckets follow the scale, at least 8px wide.
+    var bucket = niceStep(pxPerSec, 8), nb = Math.ceil(WALL / bucket) + 1, rate = new Array(nb), ratePeak = 0;
+    for (var b = 0; b < nb; b++) rate[b] = 0;
+    TESTS.forEach(function (t) { rate[Math.min(nb - 1, Math.floor(t.stop / bucket))] += 1; });
+    for (b = 0; b < nb; b++) { rate[b] /= bucket; if (rate[b] > ratePeak) ratePeak = rate[b]; }
+    var svg = ['<svg width="' + (x0 + width + RIGHT_PAD + 40) + '" height="' + H + '">'];
+    svg.push(axisSvg(x0, width, H, pxPerSec));
+    var yStep = peak <= 10 ? 1 : Math.ceil(peak / 8);
+    for (var yv = 0; yv <= peak; yv += yStep) {
+      var yy = TOP_PAD + plotH - yv / peak * plotH;
+      svg.push('<line class="grid" x1="' + x0 + '" y1="' + yy.toFixed(1) + '" x2="' + (x0 + width) + '" y2="' + yy.toFixed(1) + '"/>');
+      svg.push('<text class="lbl" x="' + (x0 - 4) + '" y="' + (yy + 4).toFixed(1) + '" text-anchor="end">' + yv + '</text>');
+    }
+    svg.push('<text class="lbl" x="' + LEFT_PAD + '" y="' + (TOP_PAD - 8) + '">workers</text>');
+    if (ratePeak > 0) {
+      var xr = x0 + width + 4;
+      svg.push('<text class="lbl" x="' + xr + '" y="' + (TOP_PAD - 8) + '">tests/s</text>');
+      svg.push('<text class="lbl" x="' + xr + '" y="' + (TOP_PAD + 4) + '">' + (ratePeak >= 10 ? ratePeak.toFixed(0) : ratePeak.toFixed(1)) + '</text>');
+      svg.push('<text class="lbl" x="' + xr + '" y="' + (TOP_PAD + plotH + 4) + '">0</text>');
+      var area = 'M' + x0 + ' ' + (TOP_PAD + plotH);
+      for (b = 0; b < nb; b++) {
+        var y1 = TOP_PAD + plotH - rate[b] / ratePeak * plotH, xa = x0 + b * bucket * pxPerSec, xb = Math.min(x0 + width, x0 + (b + 1) * bucket * pxPerSec);
+        area += ' L' + xa.toFixed(1) + ' ' + y1.toFixed(1) + ' L' + xb.toFixed(1) + ' ' + y1.toFixed(1);
+      }
+      area += ' L' + (x0 + width) + ' ' + (TOP_PAD + plotH) + ' Z';
+      svg.push('<path d="' + area + '" fill="var(--canvas-rate)" stroke="var(--canvas-rate-line)" stroke-width="0.75" stroke-opacity="0.6"/>');
+    }
+    function line(series, color) {
+      if (!series.peak) return '';
+      var d = '', prev = -1;
+      for (var col = 0; col < cols; col++) {
+        var v = series.v[col], y = TOP_PAD + plotH - v / peak * plotH, x = x0 + col;
+        if (col === 0) d += 'M' + x + ' ' + y.toFixed(1);
+        else if (v !== prev) d += ' L' + x + ' ' + (TOP_PAD + plotH - prev / peak * plotH).toFixed(1) + ' L' + x + ' ' + y.toFixed(1);
+        prev = v;
+      }
+      d += ' L' + (x0 + cols) + ' ' + (TOP_PAD + plotH - prev / peak * plotH).toFixed(1);
+      return '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="1.5"/>';
+    }
+    svg.push(line(booting, 'var(--canvas-booting)'));
+    svg.push(line(collecting, 'var(--canvas-collecting)'));
+    svg.push(line(active, 'var(--canvas-active)'));
+    svg.push('</svg>');
+    c.innerHTML = svg.join('');
+  }
+
+  // ---- table ----------------------------------------------------------------------
+  var COLS = [
+    ['idx', '#'], ['nodeid', 'Test'], ['worker', 'Worker'], ['dur', 'Total'],
+    ['setup', 'Setup'], ['call', 'Call'], ['teardown', 'Teardown'], ['outcome', 'Outcome'], ['start', 'Start']
+  ];
+  function sortVal(t, key) {
+    if (key === 'idx') return t.i;
+    if (PHASES.indexOf(key) >= 0) return t.ph[key] ? t.ph[key].dur : 0;
+    return t[key];
+  }
+  function renderTable() {
+    var tests = filteredTests(), key = state.sortKey, dir = state.sortDir;
+    tests.sort(function (a, b) { var va = sortVal(a, key), vb = sortVal(b, key); return (va < vb ? -1 : va > vb ? 1 : 0) * dir || a.i - b.i; });
+    var thead = COLS.map(function (c) { return '<th data-key="' + c[0] + '" class="' + (c[0] === key ? 'sorted' + (dir > 0 ? ' asc' : '') : '') + '">' + c[1] + '</th>'; }).join('');
+    document.querySelector('#tests-table thead').innerHTML = '<tr>' + thead + '</tr>';
+    var shown = tests.slice(0, TABLE_CAP), rows = [];
+    shown.forEach(function (t, n) {
+      rows.push('<tr><td class="num">' + (n + 1) + '</td><td class="nodeid mono">' + esc(t.nodeid) + (t.attempt ? ' <span class="muted">(attempt ' + (t.attempt + 1) + ')</span>' : '') + '</td><td class="mono">' + esc(t.worker) + '</td>' +
+        '<td class="num">' + fmt(t.dur) + '</td>' +
+        PHASES.map(function (p) { var ph = t.ph[p]; return '<td class="num">' + (ph ? fmt(ph.dur) + pct(ph.dur, t.dur) : '-') + '</td>'; }).join('') +
+        '<td class="o-' + t.outcome + '">' + esc(t.outcome) + '</td><td class="num">' + fmt(t.start) + '</td></tr>');
+    });
+    document.querySelector('#tests-table tbody').innerHTML = rows.join('') || '<tr><td colspan="9" class="empty">No tests match the current filters.</td></tr>';
+    document.getElementById('table-note').textContent = tests.length > TABLE_CAP ? '(showing ' + TABLE_CAP + ' of ' + tests.length + ')' : '(' + tests.length + ' of ' + TESTS.length + ')';
+  }
+
+  // ---- summary ---------------------------------------------------------------------
+  function renderSummary() {
+    var counts = {}; TESTS.forEach(function (t) { counts[t.outcome] = (counts[t.outcome] || 0) + 1; });
+    var busy = SUMMARY.busy, avail = 0, longest = null;
+    SUMMARY.lanes.forEach(function (l) {
+      avail += Math.max(0, l.down - l.ready);
+      if (l.last != null && (!longest || l.last > longest.last)) longest = { id: l.id, last: l.last };
+    });
+    var rows = [];
+    function row(k, v, cls) { rows.push('<tr><td>' + k + '</td><td' + (cls ? ' class="' + cls + '"' : '') + '>' + v + '</td></tr>'); }
+    row('Command:', '<code>' + esc((RUN.argv || []).join(' ') || '-') + '</code>');
+    row('Root:', '<code>' + esc(RUN.rootdir || '-') + '</code>');
+    row('Versions:', 'python ' + esc(RUN.python || '?') + ', pytest ' + esc(RUN.pytest || '?') + (RUN.xdist ? ', xdist ' + esc(RUN.xdist) : ', no xdist'));
+    row('Workers:', laneIds.length + (RUN.numprocesses != null ? ' (jobs=' + RUN.numprocesses + (RUN.dist ? ', dist=' + esc(RUN.dist) : '') + ')' : ''));
+    row('Run start:', fmtDate(RUN.start));
+    row('Total time:', fmt(WALL) + (RUN.complete === false ? ' <span class="error-text">(incomplete run)</span>' : ''));
+    var TERM = (DATA.terminations || {})[RUN.termination] || { label: RUN.termination || 'unknown' };
+    row('Ended:', esc(TERM.label) + (RUN.reason ? ' <span class="muted">' + esc(RUN.reason) + '</span>' : '') + (RUN.exit_status != null ? ', exit status ' + RUN.exit_status : ''), RUN.complete === false ? 'error-text' : undefined);
+    row('Tests:', TESTS.length + OUTCOMES.filter(function (o) { return counts[o]; }).map(function (o) { return ', ' + counts[o] + ' ' + o; }).join(''));
+    row('Busy time:', fmt(busy) + (avail > 0 ? ' of ' + fmt(avail) + ' available (' + Math.round(busy / avail * 100) + '% utilisation)' : ''));
+    if (longest && laneIds.length > 1) row('Critical lane:', esc(longest.id) + ', last test finished at ' + fmt(longest.last));
+    var collect = WORKERS.filter(function (w) { return w.ready != null && w.collected != null; });
+    if (collect.length) {
+      var cmax = maxOf(collect, function (w) { return w.collected - w.ready; });
+      var rmax = maxOf(collect.filter(function (w) { return w.start != null; }), function (w) { return w.ready - w.start; }, 0);
+      row('Worker startup:', 'boot up to ' + fmt(rmax) + ', collection up to ' + fmt(cmax));
+    }
+    var errs = WORKERS.filter(function (w) { return w.error; });
+    if (errs.length) row('Errors:', errs.map(function (w) { return esc(w.id) + ': ' + esc(w.error); }).join('<br>'), 'error-text');
+    document.getElementById('summary').innerHTML = rows.join('');
+  }
+
+  // ---- tooltip / pin ----------------------------------------------------------------
+  var tip = document.getElementById('tooltip');
+  function phaseRows(t) {
+    return '<table>' + PHASES.map(function (p) { var ph = t.ph[p]; return ph ? '<tr><td>' + p + '</td><td>' + fmt(ph.dur) + pct(ph.dur, t.dur) + '</td></tr>' : ''; }).join('') + '</table>';
+  }
+  function tipForTest(t) {
+    return '<b>' + esc(t.nodeid) + '</b><br>' + esc(t.outcome) + ' on ' + esc(t.worker) + (t.attempt ? ' (attempt ' + (t.attempt + 1) + ')' : '') +
+      '<br>total ' + fmt(t.dur) + ', started at ' + fmt(t.start) + phaseRows(t);
+  }
+  function tipForCluster(c) {
+    var top = c.tests.slice().sort(function (a, b) { return b.dur - a.dur; }).slice(0, 10);
+    var total = 0; c.tests.forEach(function (t) { total += t.dur; });
+    return '<b>' + c.tests.length + ' tiny tests</b> merged, ' + fmt(c.start) + ' → ' + fmt(c.stop) + ', busy ' + fmt(total) + '<br><span class="muted">zoom in to separate them</span><table>' +
+      top.map(function (t) { return '<tr><td>' + fmt(t.dur) + '</td><td class="' + (BAD[t.outcome] ? 'error-text' : '') + '">' + esc(t.nodeid) + '</td></tr>'; }).join('') +
+      (c.tests.length > 10 ? '<tr><td colspan="2" class="muted">… and ' + (c.tests.length - 10) + ' more</td></tr>' : '') + '</table>';
+  }
+  function barTarget(ev) { var el = ev.target; while (el && el !== document.body && !(el.classList && el.classList.contains('bar'))) el = el.parentNode; return el && el !== document.body ? el : null; }
+  var pc = document.getElementById('pipeline-container');
+  pc.addEventListener('mousemove', function (ev) {
+    var g = barTarget(ev);
+    if (!g) { tip.style.display = 'none'; return; }
+    tip.innerHTML = g.dataset.c != null ? tipForCluster(clusters[+g.dataset.c]) : tipForTest(TESTS[+g.dataset.i]);
+    tip.style.display = 'block';
+    var x = ev.clientX + 14, y = ev.clientY + 14;
+    if (x + tip.offsetWidth > window.innerWidth - 8) x = Math.max(8, ev.clientX - tip.offsetWidth - 14);
+    if (y + tip.offsetHeight > window.innerHeight - 8) y = Math.max(8, ev.clientY - tip.offsetHeight - 14);
+    tip.style.left = x + 'px'; tip.style.top = y + 'px';
+  });
+  pc.addEventListener('mouseleave', function () { tip.style.display = 'none'; });
+  pc.addEventListener('click', function (ev) {
+    var g = barTarget(ev);
+    if (!g || g.dataset.i == null) { state.pinned = null; applyPin(); return; }
+    var m = +g.dataset.m;
+    state.pinned = state.pinned === m ? null : m;
+    applyPin();
+  });
+  function applyPin() {
+    var bars = pc.querySelectorAll('.bar');
+    for (var i = 0; i < bars.length; i++) {
+      var g = bars[i];
+      g.classList.remove('dim'); g.classList.remove('hl');
+      if (state.pinned == null) continue;
+      if (g.dataset.m != null && +g.dataset.m === state.pinned) g.classList.add('hl'); else g.classList.add('dim');
+    }
+  }
+
+  // ---- controls --------------------------------------------------------------------
+  var minInput = document.getElementById('min-unit-time'), minOut = document.getElementById('min-unit-time-output');
+  minInput.max = Math.max(0.05, Math.ceil(maxDur * 20) / 20);
+  minInput.step = Math.max(0.001, minInput.max / 200);
+  var minTimer = null;
+  minInput.addEventListener('input', function () {
+    state.minTime = +minInput.value; minOut.textContent = fmt(state.minTime);
+    clearTimeout(minTimer); minTimer = setTimeout(function () { renderPipeline(); renderTable(); }, 40);
+  });
+
+  var scaleInput = document.getElementById('scale'), scaleOut = document.getElementById('scale-output');
+  var fitPx = Math.max(20, Math.min(4096, (document.body.clientWidth || 1200) - 160)) / WALL;
+  var scaleMin = Math.max(fitPx / 4, 0.001), scaleMax = Math.max(fitPx * 200, 2000);
+  scaleInput.min = 0; scaleInput.max = 1000; scaleInput.step = 1;
+  function scaleFromSlider(v) { return scaleMin * Math.pow(scaleMax / scaleMin, v / 1000); }
+  function sliderFromScale(s) { return Math.round(1000 * Math.log(s / scaleMin) / Math.log(scaleMax / scaleMin)); }
+  state.pxPerSec = fitPx;
+  scaleInput.value = sliderFromScale(fitPx);
+  function showScale() { scaleOut.textContent = (state.pxPerSec >= 10 ? state.pxPerSec.toFixed(0) : state.pxPerSec.toFixed(2)) + ' px/s'; }
+  showScale();
+  var scaleTimer = null;
+  scaleInput.addEventListener('input', function () {
+    state.pxPerSec = scaleFromSlider(+scaleInput.value); showScale();
+    clearTimeout(scaleTimer); scaleTimer = setTimeout(function () { renderPipeline(); renderConcurrency(); }, 40);
+  });
+
+  document.getElementById('view-lane').addEventListener('click', function () { setView('lane'); });
+  document.getElementById('view-unit').addEventListener('click', function () { setView('unit'); });
+  function setView(v) {
+    state.view = v;
+    document.getElementById('view-lane').classList.toggle('on', v === 'lane');
+    document.getElementById('view-unit').classList.toggle('on', v === 'unit');
+    renderPipeline();
+  }
+  var topInput = document.getElementById('top-n');
+  topInput.addEventListener('change', function () { state.topN = Math.max(1, +topInput.value || 50); if (state.view === 'unit') renderPipeline(); });
+
+  var of = document.getElementById('outcome-filters'), present = {};
+  TESTS.forEach(function (t) { present[t.outcome] = 1; });
+  OUTCOMES.filter(function (o) { return present[o]; }).forEach(function (o) {
+    var l = document.createElement('label');
+    var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = true;
+    cb.addEventListener('change', function () { state.outcomes[o] = cb.checked; renderPipeline(); renderTable(); });
+    l.appendChild(cb); l.appendChild(document.createTextNode(o));
+    of.appendChild(l);
+  });
+  var textInput = document.getElementById('text-filter'), textTimer = null;
+  textInput.addEventListener('input', function () {
+    clearTimeout(textTimer); textTimer = setTimeout(function () { state.text = textInput.value.trim(); renderPipeline(); renderTable(); }, 120);
+  });
+  document.querySelector('#tests-table thead').addEventListener('click', function (ev) {
+    var th = ev.target.closest ? ev.target.closest('th') : null;
+    if (!th || !th.dataset.key) return;
+    if (state.sortKey === th.dataset.key) state.sortDir = -state.sortDir;
+    else { state.sortKey = th.dataset.key; state.sortDir = (th.dataset.key === 'nodeid' || th.dataset.key === 'worker' || th.dataset.key === 'outcome' || th.dataset.key === 'idx' || th.dataset.key === 'start') ? 1 : -1; }
+    renderTable();
+  });
+
+  // ---- go --------------------------------------------------------------------------
+  renderSummary();
+  renderPipeline();
+  renderConcurrency();
+  renderTable();
+  } catch (e) {
+    // Surface failures in the document so automated checks can see them.
+    var pre = document.createElement('pre');
+    pre.id = 'render-error';
+    pre.className = 'error-text';
+    pre.textContent = 'pytest-timing report failed to render: ' + ((e && e.stack) || e);
+    document.body.appendChild(pre);
+    throw e;
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: py${{ matrix.python }} / pytest ${{ matrix.pytest }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        pytest: ["latest"]
+        include:
+          - { os: ubuntu-latest, python: "3.10", pytest: "7.3" }
+          - { os: ubuntu-latest, python: "3.11", pytest: "7.4" }
+          - { os: ubuntu-latest, python: "3.12", pytest: "8.0" }
+          - { os: windows-latest, python: "3.12", pytest: "latest" }
+          - { os: macos-latest, python: "3.13", pytest: "latest" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: |
+          uv sync --no-dev
+          uv pip install pytest-xdist pytest-rerunfailures hypothesis
+          if [ "${{ matrix.pytest }}" != "latest" ]; then uv pip install "pytest~=${{ matrix.pytest }}.0"; fi
+        shell: bash
+      - name: Test
+        run: uv run --no-sync pytest -v -p no:cacheprovider
+
+  no-xdist:
+    name: without pytest-xdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --no-dev
+      - run: uv pip install hypothesis
+      - run: uv run --no-sync pytest -v -p no:cacheprovider
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync
+      - run: uv run ruff check src tests
+      - run: uv run ruff format --check src tests
+      - run: uv run mypy

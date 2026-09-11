@@ -476,7 +476,7 @@ wheels = [
 
 [[package]]
 name = "pytest-timing"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "pytest" },
@@ -499,7 +499,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "pytest", specifier = ">=7.3" },
-    { name = "pytest-xdist", marker = "extra == 'xdist'", specifier = ">=3.0" },
+    { name = "pytest-xdist", marker = "extra == 'xdist'", specifier = ">=3.7" },
 ]
 provides-extras = ["xdist"]
 
@@ -508,7 +508,7 @@ dev = [
     { name = "hypothesis", specifier = ">=6" },
     { name = "mypy", specifier = ">=1.10" },
     { name = "pytest-rerunfailures", specifier = ">=12" },
-    { name = "pytest-xdist", specifier = ">=3.0" },
+    { name = "pytest-xdist", specifier = ">=3.7" },
     { name = "ruff", specifier = ">=0.6" },
 ]
 

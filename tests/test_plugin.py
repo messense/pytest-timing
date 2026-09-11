@@ -9,10 +9,8 @@ import re
 import sys
 
 import pytest
-from conftest import load_json
+from conftest import load_json, needs_xdist
 
-HAS_XDIST = importlib.util.find_spec("xdist") is not None
-needs_xdist = pytest.mark.skipif(not HAS_XDIST, reason="pytest-xdist not installed")
 HAS_RERUNS = importlib.util.find_spec("pytest_rerunfailures") is not None
 needs_reruns = pytest.mark.skipif(not HAS_RERUNS, reason="pytest-rerunfailures not installed")
 PYTEST_VERSION = tuple(int(x) for x in pytest.__version__.split(".")[:2])
@@ -51,9 +49,6 @@ def suite(pytester: pytest.Pytester) -> pytest.Pytester:
     return pytester
 
 
-# ---- basics --------------------------------------------------------------------------
-
-
 def test_disabled_by_default(suite: pytest.Pytester) -> None:
     result = suite.runpytest("-p", "no:cacheprovider")
     assert "timing report" not in result.stdout.str()
@@ -81,9 +76,6 @@ def test_ini_and_env_enable(suite: pytest.Pytester, monkeypatch: pytest.MonkeyPa
     assert "timing report" in out
     assert "slowest 2 tests" in out
     assert out[out.index("timing report") :].isascii()
-
-
-# ---- CLI contract: output flags never change test selection or touch source files -----
 
 
 def _assert_selection_preserved(suite: pytest.Pytester, result: pytest.RunResult) -> None:
@@ -179,9 +171,6 @@ def test_bare_flag_with_late_plugin_loading(
     _assert_selection_preserved(suite, result)
     assert target.read_bytes() == before
     assert (suite.path / "pytest-timing.json").exists()
-
-
-# ---- lifecycle contract: termination is recorded, completeness derived from it --------
 
 
 def test_finished_run(suite: pytest.Pytester) -> None:
@@ -280,9 +269,6 @@ def test_keyboard_interrupt_is_recorded(pytester: pytest.Pytester) -> None:
     assert doc["run"]["termination"] == "interrupted"
     assert "KeyboardInterrupt" in doc["run"]["reason"]
     assert doc["run"]["complete"] is False
-
-
-# ---- xdist ------------------------------------------------------------------------------
 
 
 @needs_xdist

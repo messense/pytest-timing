@@ -8,14 +8,16 @@ Identity is inferred, and the inference is deliberately narrow: reports carry on
 a nodeid and a worker, so when a ``setup`` report arrives for a nodeid whose previous
 span on that worker is closed, it is a new *attempt* of the same occurrence if that
 span was retried (outcome ``rerun``), and otherwise a new *occurrence* (a duplicate
-selection). Nothing else about identity is guessed.
+selection). Optional worker execution tokens associate admission waits with the
+correct span; they do not change that public occurrence/attempt numbering.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
-from pytest_timing.model import PHASES, Phase, Run, RunInfo, TestSpan, Worker
+from pytest_timing.model import PHASES, CpuRecord, Phase, Run, RunInfo, TestSpan, Worker
 
 CRASH_WHEN = "???"  # xdist synthesises a report with this ``when`` for crashed items
 RETRIED = "rerun"
@@ -34,6 +36,9 @@ class PhaseReport:
     worker: str
     wasxfail: bool = False
     received: float = 0.0  # epoch seconds when the controller saw the report
+    fixtures: dict[str, float | None] | None = None  # shared fixtures, setup and call
+    cpu: dict[str, Any] | None = None  # the worker's CPU record, on the teardown report
+    execution: tuple[int, int] | None = None  # collection index, attempt on that worker
 
 
 class Collector:
@@ -44,8 +49,7 @@ class Collector:
         self._open: dict[tuple[str, str], TestSpan] = {}
         self._last: dict[tuple[str, str], TestSpan] = {}
         self._last_stop: dict[str, float] = {}  # when each worker's latest span closed
-
-    # ---- worker lifecycle ----------------------------------------------------------
+        self._executions: dict[tuple[str, int, int], TestSpan] = {}
 
     def _worker(self, worker_id: str) -> Worker:
         worker = self.workers.get(worker_id)
@@ -68,6 +72,26 @@ class Collector:
         worker.collected = self._rel(epoch)
         worker.items = items
 
+    def add_wait(
+        self, worker_id: str, nodeid: str, index: int, attempt: int, seconds: float
+    ) -> None:
+        """Add an admission delay to the exact execution that waited.
+
+        A nodeid can have several selections and retries. Looking up its last span
+        at session finish would put every delay on the final one instead.
+        """
+        span = self._executions.get((worker_id, index, attempt))
+        if span is None:
+            # A worker may die in setup before sending any report (and therefore
+            # any execution token). Only its unreported crash can match here;
+            # never fall back to another attempt that has already sent reports.
+            span = self._last.get((worker_id, nodeid))
+            if span is None or span.outcome != "crashed" or span.phases or span.attempt != attempt:
+                return
+        if span.cpu is None:
+            span.cpu = CpuRecord(elapsed=span.duration)
+        span.cpu.wait += seconds
+
     def worker_down(self, worker_id: str, epoch: float, error: str | None) -> None:
         worker = self._worker(worker_id)
         worker.down = self._rel(epoch)
@@ -78,8 +102,6 @@ class Collector:
             span.stop = max(span.stop, worker.down)
             span.outcome = "crashed"
             self._close(span)
-
-    # ---- phase reports -------------------------------------------------------------
 
     def add_report(self, report: PhaseReport) -> None:
         key = (report.worker, report.nodeid)
@@ -101,7 +123,14 @@ class Collector:
                 self._close(span)
             span = self._new_span(key, start, stop)
 
+        if report.execution is not None:
+            self._executions[(report.worker, *report.execution)] = span
+
         span.phases[report.when] = Phase(start=start, stop=stop, duration=report.duration)
+        if report.fixtures:
+            span.fixtures.update(report.fixtures)
+        if report.cpu:
+            span.cpu = CpuRecord.from_dict(report.cpu)
         span.start = min(span.start, start)
         span.stop = max(span.stop, stop)
         self._apply_outcome(span, report)
@@ -178,8 +207,6 @@ class Collector:
         self._open.pop((span.worker, span.nodeid), None)
         previous = self._last_stop.get(span.worker, 0.0)
         self._last_stop[span.worker] = max(previous, span.stop)
-
-    # ---- finish --------------------------------------------------------------------
 
     def finish(self, epoch: float, *, termination: str, reason: str | None = None) -> Run:
         self.run.stop = epoch

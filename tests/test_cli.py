@@ -158,14 +158,12 @@ def test_early_schema1_reports_load_render_merge_and_round_trip(
     assert run.run.termination == termination
     assert run.run.complete is complete
     assert run.run.reason is None
-    # CLI rendering
     html = tmp_path / "r.html"
     assert main(["render", str(src), "--html", str(html), "--ascii", "--width", "80"]) == 0
     out = capsys.readouterr().out
     assert "pytest-timing: 2 tests" in out
     assert ("ended: " in out) is (not complete)
     assert "pytest-timing-data" in html.read_text()
-    # merging with itself, shifted
     merged = merge_runs([run, run.rebased(run.run.start - 10)], ["a", "b"])
     assert len(merged.worker_ids()) == 4
     assert merged.run.complete is complete

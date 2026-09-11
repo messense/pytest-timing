@@ -11,6 +11,13 @@ Semantics that every renderer must agree on live here, once:
 * Identity: a *worker* is a lane, a *test occurrence* is one collected item on a
   worker (duplicate selections are separate occurrences), and an *attempt* is one
   execution of an occurrence (retries add attempts).
+* ``TestSpan.fixtures`` maps the shared (class / module / package / session) fixtures
+  an attempt used to the seconds spent setting each one up for it, or ``None`` when it
+  was already set up; see :mod:`pytest_timing.fixtures` for the key format.
+* ``TestSpan.cpu`` is what the attempt cost in CPU terms (:class:`CpuRecord`): elapsed
+  time, measured CPU work of the worker and its descendants, declared demand, how much
+  of the process tree the measurement covered, and how long the controller held the
+  test back for CPU slots. ``RunInfo.cpu`` describes the hosts and the budget.
 """
 
 from __future__ import annotations
@@ -23,9 +30,6 @@ from typing import Any
 SCHEMA_VERSION = 1
 
 PHASES: tuple[str, ...] = ("setup", "call", "teardown")
-
-
-# ---- outcomes ------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,9 +56,6 @@ OUTCOME_REGISTRY: dict[str, OutcomeInfo] = {
     )
 }
 BAD_OUTCOMES: frozenset[str] = frozenset(o.name for o in OUTCOME_REGISTRY.values() if o.is_failure)
-
-
-# ---- session termination -------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +139,69 @@ class Phase:
 
 
 @dataclass(slots=True)
+class CpuRecord:
+    """CPU accounting of one attempt; see :mod:`pytest_timing.demand`.
+
+    ``work`` and ``setup_work`` are CPU seconds; ``coverage`` says what the
+    measurement saw (``tree``, ``reaped``, ``self`` or ``none``); ``pressure`` is the
+    host's CPU stall share when the attempt ended and ``throttled`` whether a cgroup
+    quota throttled it, both ``None`` when the platform does not tell.
+    """
+
+    elapsed: float = 0.0
+    work: float = 0.0
+    setup_work: float = 0.0  # inside shared fixture set-ups charged to this attempt
+    demand: int = 1  # declared slots
+    coverage: str = "none"
+    pressure: float | None = None
+    throttled: bool | None = None
+    wait: float = 0.0  # total seconds held back by CPU admission
+    runtime_wait: float = 0.0  # the part inside the test span; excluded from elapsed/work
+
+    @property
+    def contended(self) -> bool:
+        """Was the host visibly short of CPU while this ran?"""
+        return bool(self.throttled) or (
+            self.pressure is not None and self.pressure >= CONTENDED_PRESSURE
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        doc: dict[str, Any] = {
+            "elapsed": _round(self.elapsed),
+            "work": _round(self.work),
+            "setup_work": _round(self.setup_work),
+            "demand": self.demand,
+            "coverage": self.coverage,
+            "pressure": _opt_round(self.pressure),
+            "throttled": self.throttled,
+        }
+        if self.wait:
+            doc["wait"] = _round(self.wait)
+        if self.runtime_wait:
+            doc["runtime_wait"] = _round(self.runtime_wait)
+        return doc
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CpuRecord:
+        throttled = data.get("throttled")
+        return cls(
+            elapsed=float(data.get("elapsed", 0.0)),
+            work=float(data.get("work", 0.0)),
+            setup_work=float(data.get("setup_work", 0.0)),
+            demand=int(data.get("demand", 1)),
+            coverage=str(data.get("coverage", "none")),
+            pressure=_opt_float(data, "pressure"),
+            throttled=None if throttled is None else bool(throttled),
+            wait=float(data.get("wait", 0.0)),
+            runtime_wait=float(data.get("runtime_wait", 0.0)),
+        )
+
+
+CONTENDED_PRESSURE = 0.25
+"""PSI share above which an attempt is not a clean observation of its duration."""
+
+
+@dataclass(slots=True)
 class TestSpan:
     """One attempt at running one test occurrence on one worker.
 
@@ -155,10 +219,17 @@ class TestSpan:
     stop: float
     phases: dict[str, Phase] = field(default_factory=dict)
     occurrence: int = 0
+    fixtures: dict[str, float | None] = field(default_factory=dict)
+    cpu: CpuRecord | None = None
 
     @property
     def duration(self) -> float:
         return self.stop - self.start
+
+    @property
+    def shared_setup(self) -> float:
+        """Seconds of shared fixture set-up charged to this attempt."""
+        return sum(v for v in self.fixtures.values() if v)
 
     @property
     def is_bad(self) -> bool:
@@ -173,7 +244,7 @@ class TestSpan:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        doc: dict[str, Any] = {
             "nodeid": self.nodeid,
             "worker": self.worker,
             "occurrence": self.occurrence,
@@ -183,9 +254,16 @@ class TestSpan:
             "stop": _round(self.stop),
             "phases": {name: phase.to_list() for name, phase in self.phases.items()},
         }
+        if self.fixtures:
+            doc["fixtures"] = {key: _opt_round(seconds) for key, seconds in self.fixtures.items()}
+        if self.cpu is not None:
+            doc["cpu"] = self.cpu.to_dict()
+        return doc
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TestSpan:
+        fixtures = data.get("fixtures") or {}
+        cpu = data.get("cpu")
         return cls(
             nodeid=str(data["nodeid"]),
             worker=str(data["worker"]),
@@ -198,6 +276,11 @@ class TestSpan:
                 str(name): Phase.from_list(value)
                 for name, value in dict(data.get("phases", {})).items()
             },
+            fixtures={
+                str(key): None if seconds is None else float(seconds)
+                for key, seconds in dict(fixtures).items()
+            },
+            cpu=CpuRecord.from_dict(dict(cpu)) if isinstance(cpu, dict) else None,
         )
 
 
@@ -267,6 +350,7 @@ class RunInfo:
     xdist: str | None = None
     dist: str | None = None
     numprocesses: int | None = None
+    cpu: dict[str, Any] | None = None  # hosts, budget and admission summary
 
     @property
     def wall(self) -> float:
@@ -296,6 +380,7 @@ class RunInfo:
             "xdist": self.xdist,
             "dist": self.dist,
             "numprocesses": self.numprocesses,
+            "cpu": self.cpu,
         }
 
     @classmethod
@@ -321,6 +406,7 @@ class RunInfo:
             xdist=None if data.get("xdist") is None else str(data["xdist"]),
             dist=None if data.get("dist") is None else str(data["dist"]),
             numprocesses=None if numprocesses is None else int(numprocesses),
+            cpu=dict(data["cpu"]) if isinstance(data.get("cpu"), dict) else None,
         )
 
 
@@ -373,8 +459,6 @@ class Run:
     run: RunInfo
     workers: list[Worker] = field(default_factory=list)
     tests: list[TestSpan] = field(default_factory=list)
-
-    # ---- derived helpers used by every renderer -------------------------------------
 
     @property
     def wall(self) -> float:
@@ -460,8 +544,6 @@ class Run:
             ],
         }
 
-    # ---- model operations ---------------------------------------------------------
-
     def rebased(self, base_epoch: float) -> Run:
         """The same run expressed relative to ``base_epoch``.
 
@@ -483,8 +565,6 @@ class Run:
             workers=[replace(w, id=mapping.get(w.id, w.id)) for w in self.workers],
             tests=[replace(t, worker=mapping.get(t.worker, t.worker)) for t in self.tests],
         )
-
-    # ---- serialisation ------------------------------------------------------------
 
     def to_dict(self) -> dict[str, Any]:
         from pytest_timing import __version__

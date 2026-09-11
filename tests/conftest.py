@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import pathlib
 from typing import Any
@@ -10,6 +11,9 @@ from pytest_timing.collector import Collector, PhaseReport
 from pytest_timing.model import Run, RunInfo
 
 pytest_plugins = ["pytester"]
+
+HAS_XDIST = importlib.util.find_spec("xdist") is not None
+needs_xdist = pytest.mark.skipif(not HAS_XDIST, reason="pytest-xdist not installed")
 
 T0 = 1_700_000_000.0
 
@@ -114,6 +118,39 @@ def chart_columns(line: str, run: Run) -> str:
 def load_json(path: pathlib.Path, name: str = "pytest-timing.json") -> dict[str, Any]:
     data: dict[str, Any] = json.loads((path / name).read_text())
     return data
+
+
+def run_timing(
+    pytester: pytest.Pytester, *args: str, timeout: float | None = None
+) -> pytest.RunResult:
+    """Run a behavior scenario with JSON timing and no pytest cache."""
+    return pytester.runpytest_subprocess(
+        *args, "--timing-json", "-p", "no:cacheprovider", timeout=timeout
+    )
+
+
+def write_history(path: pathlib.Path, durations: dict[str, float], *, stop: float) -> None:
+    """Write a duration-only run; insertion order determines collection order."""
+    collector = Collector(make_info())
+    for index, (nodeid, duration) in enumerate(durations.items()):
+        full_test(collector, nodeid, index, setup=0, call=duration, teardown=0)
+    path.write_text(collector.finish(T0 + stop, termination="finished").to_json())
+
+
+def events(pytester: pytest.Pytester) -> list[Any]:
+    return sorted(
+        json.loads(line) for line in (pytester.path / "events.jsonl").read_text().splitlines()
+    )
+
+
+def event_peak(pytester: pytest.Pytester) -> int:
+    """Find the peak declared slots and require every recorded hold to be released."""
+    used = peak = 0
+    for _, _, _, delta in events(pytester):
+        used += delta
+        peak = max(peak, used)
+    assert used == 0
+    return peak
 
 
 @pytest.fixture

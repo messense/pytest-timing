@@ -200,7 +200,6 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
   var BOX_HEIGHT = 26, BAR_H = 20, LEFT_PAD = 8, RIGHT_PAD = 24, TOP_PAD = 24, BOTTOM_PAD = 22;
   var TABLE_CAP = 2000;
 
-  // ---- data prep -------------------------------------------------------------------
   var moduleIndex = {}, modules = [];
   TESTS.forEach(function (t, i) {
     t.i = i;
@@ -238,7 +237,6 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
   var state = { minTime: 0, pxPerSec: 100, view: 'lane', topN: 50, outcomes: {}, text: '', pinned: null, sortKey: 'dur', sortDir: -1 };
   OUTCOMES.forEach(function (o) { state.outcomes[o] = true; });
 
-  // ---- helpers ---------------------------------------------------------------------
   function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
   function fmt(s) {
     if (s == null || isNaN(s)) return '-';
@@ -330,7 +328,6 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
     return s + '</g>';
   }
 
-  // ---- pipeline: lane view -----------------------------------------------------------
   function renderLanes(tests) {
     clusters = [];
     var byLane = {}; laneIds.forEach(function (id) { byLane[id] = []; });
@@ -364,7 +361,6 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
     return svg.join('');
   }
 
-  // ---- pipeline: unit view -----------------------------------------------------------
   function renderUnits(tests) {
     clusters = [];
     var allowed = new Set(tests), top = [];
@@ -406,7 +402,6 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
       '<span class="muted">hover for details, click to pin a module</span>';
   }
 
-  // ---- concurrency ----------------------------------------------------------------
   function renderConcurrency() {
     var c = document.getElementById('timing-container');
     if (!TESTS.length && !WORKERS.length) { c.innerHTML = '<div class="empty">No data.</div>'; return; }
@@ -471,7 +466,6 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
     c.innerHTML = svg.join('');
   }
 
-  // ---- table ----------------------------------------------------------------------
   var COLS = [
     ['idx', '#'], ['nodeid', 'Test'], ['worker', 'Worker'], ['dur', 'Total'],
     ['setup', 'Setup'], ['call', 'Call'], ['teardown', 'Teardown'], ['outcome', 'Outcome'], ['start', 'Start']
@@ -497,7 +491,6 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
     document.getElementById('table-note').textContent = tests.length > TABLE_CAP ? '(showing ' + TABLE_CAP + ' of ' + tests.length + ')' : '(' + tests.length + ' of ' + TESTS.length + ')';
   }
 
-  // ---- summary ---------------------------------------------------------------------
   function renderSummary() {
     var counts = {}; TESTS.forEach(function (t) { counts[t.outcome] = (counts[t.outcome] || 0) + 1; });
     var busy = SUMMARY.busy, avail = 0, longest = null;
@@ -529,7 +522,6 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
     document.getElementById('summary').innerHTML = rows.join('');
   }
 
-  // ---- tooltip / pin ----------------------------------------------------------------
   var tip = document.getElementById('tooltip');
   function phaseRows(t) {
     return '<table>' + PHASES.map(function (p) { var ph = t.ph[p]; return ph ? '<tr><td>' + p + '</td><td>' + fmt(ph.dur) + pct(ph.dur, t.dur) + '</td></tr>' : ''; }).join('') + '</table>';
@@ -575,7 +567,6 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
     }
   }
 
-  // ---- controls --------------------------------------------------------------------
   var minInput = document.getElementById('min-unit-time'), minOut = document.getElementById('min-unit-time-output');
   minInput.max = Math.max(0.05, Math.ceil(maxDur * 20) / 20);
   minInput.step = Math.max(0.001, minInput.max / 200);
@@ -633,7 +624,6 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
     renderTable();
   });
 
-  // ---- go --------------------------------------------------------------------------
   renderSummary();
   renderPipeline();
   renderConcurrency();

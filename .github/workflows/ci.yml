@@ -7,7 +7,7 @@ on:
 
 jobs:
   test:
-    name: py${{ matrix.python }} / pytest ${{ matrix.pytest }}
+    name: py${{ matrix.python }} / pytest ${{ matrix.pytest }}${{ matrix.xdist && format(' / xdist {0}', matrix.xdist) || '' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -16,7 +16,7 @@ jobs:
         python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
         pytest: ["latest"]
         include:
-          - { os: ubuntu-latest, python: "3.10", pytest: "7.3" }
+          - { os: ubuntu-latest, python: "3.10", pytest: "7.3", xdist: "3.7.0" }
           - { os: ubuntu-latest, python: "3.11", pytest: "7.4" }
           - { os: ubuntu-latest, python: "3.12", pytest: "8.0" }
           - { os: windows-latest, python: "3.12", pytest: "latest" }
@@ -31,6 +31,7 @@ jobs:
           uv sync --no-dev
           uv pip install pytest-xdist pytest-rerunfailures hypothesis
           if [ "${{ matrix.pytest }}" != "latest" ]; then uv pip install "pytest~=${{ matrix.pytest }}.0"; fi
+          if [ -n "${{ matrix.xdist }}" ]; then uv pip install "pytest-xdist==${{ matrix.xdist }}"; fi
         shell: bash
       - name: Test
         run: uv run --no-sync pytest -v -p no:cacheprovider

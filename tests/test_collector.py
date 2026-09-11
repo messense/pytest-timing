@@ -1,9 +1,35 @@
 from __future__ import annotations
 
+import pytest
 from conftest import T0, crash_report, full_test, make_info, report
 
 from pytest_timing.collector import Collector, PhaseReport
 from pytest_timing.model import Run
+
+
+def test_waits_use_execution_identity_and_accumulate_across_requests() -> None:
+    collector = Collector(make_info())
+    # Two selections with the same nodeid on gw0, the first retried without a
+    # teardown report; the same collection index also appears on another worker.
+    executions = [("gw0", 4, 0), ("gw0", 4, 1), ("gw0", 9, 0), ("gw1", 4, 0)]
+    for number, (worker, index, attempt) in enumerate(executions):
+        for when in ("setup", "call", "teardown"):
+            if number == 0 and when == "teardown":
+                continue
+            phase = report("test.py::test_same", when, number, number + 0.1, worker=worker)
+            phase.execution = (index, attempt)
+            if number == 0 and when == "call":
+                phase.outcome = "rerun"
+            collector.add_report(phase)
+    collector.add_wait("gw0", "test.py::test_same", 4, 0, 0.2)
+    collector.add_wait("gw0", "test.py::test_same", 4, 0, 0.3)
+    collector.add_wait("gw0", "test.py::test_same", 4, 1, 0.1)
+    collector.add_wait("gw0", "test.py::test_same", 9, 0, 0.4)
+    collector.add_wait("gw1", "test.py::test_same", 4, 0, 0.6)
+    collector.add_wait("gw0", "test.py::test_same", 100, 0, 9)  # never guess another execution
+    run = collector.finish(T0 + 5, termination="finished")
+    assert [t.cpu.wait for t in run.tests if t.cpu] == pytest.approx([0.5, 0.1, 0.4, 0.6])
+    assert [(t.occurrence, t.attempt) for t in run.tests] == [(0, 0), (0, 1), (1, 0), (0, 0)]
 
 
 def test_phases_fold_into_one_span() -> None:
@@ -26,17 +52,13 @@ def test_phases_fold_into_one_span() -> None:
 def test_outcomes() -> None:
     c = Collector(make_info())
     full_test(c, "t.py::fail", 0, outcome="failed")
-    # error in setup
     c.add_report(report("t.py::err", "setup", 1, 1.1, outcome="failed"))
     c.add_report(report("t.py::err", "teardown", 1.1, 1.2))
-    # skipped
     c.add_report(report("t.py::skip", "setup", 2, 2.1, outcome="skipped"))
     c.add_report(report("t.py::skip", "teardown", 2.1, 2.2))
-    # xfail
     c.add_report(report("t.py::xf", "setup", 3, 3.1))
     c.add_report(report("t.py::xf", "call", 3.1, 3.2, outcome="skipped", wasxfail=True))
     c.add_report(report("t.py::xf", "teardown", 3.2, 3.3))
-    # xpass
     c.add_report(report("t.py::xp", "setup", 4, 4.1))
     c.add_report(report("t.py::xp", "call", 4.1, 4.2, outcome="passed", wasxfail=True))
     c.add_report(report("t.py::xp", "teardown", 4.2, 4.3))

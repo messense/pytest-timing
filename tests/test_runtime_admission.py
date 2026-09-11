@@ -279,6 +279,8 @@ def test_runtime_wait_is_excluded_from_test_and_fixture_estimates(
     result.assert_outcomes(passed=2)
     run = Run.from_dict(load_json(pytester.path))
     estimates = Estimates.from_run(run)
+    print("DIAG", estimates.setups, estimates.durations, [t.cpu for t in run.tests])  # DIAG
+    print("DIAG", (pytester.path / "pytest-timing.json").read_text())  # DIAG
     assert max(t.cpu.runtime_wait for t in run.tests if t.cpu) >= 0.2
     assert all(duration < 0.15 for duration in estimates.durations.values())
     for test in run.tests:

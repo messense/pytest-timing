@@ -124,7 +124,9 @@ def test_shared_fixtures_are_recorded_with_scope_keys(
     result = pytester.runpytest_subprocess("--timing-json", "-p", "no:cacheprovider", *extra)
     result.assert_outcomes(passed=6)
     tests = by_name(load_json(pytester.path))
+    import json as _json  # DIAG
 
+    print("DIAG", _json.dumps(tests, indent=1, sort_keys=True))  # DIAG
 
     assert shapes(tests["test_client"]) == {("session", "db[]"), ("module", "conn[]")}
     assert "module:test_fx.py:test_fx.py::conn[]" in tests["test_client"]["fixtures"]

@@ -22,7 +22,7 @@ def cfg(request):
 
 @pytest.fixture(scope="session")
 def inner():
-    time.sleep(0.1)
+    time.sleep(0.4)
 
 @pytest.fixture(scope="session")
 def outer(request):
@@ -150,12 +150,14 @@ def test_shared_fixtures_are_recorded_with_scope_keys(
         seconds = [v for t in tests.values() for v in fixtures_named(t, name).values() if v]
         assert seconds and all(0.015 < v < 0.5 for v in seconds), name
 
-    # The nested set-up is not double counted.
+    # The nested set-up is not double counted. A loaded CI runner (macOS
+    # especially) stretches a 30ms body to almost 200ms, so the ceiling is set by
+    # what counting ``inner`` would add (0.4s), not by the body's nominal cost.
     nested = tests["test_nested"]
     (outer,) = fixtures_named(nested, "outer").values()
     (inner,) = fixtures_named(nested, "inner").values()
-    assert outer is not None and 0.02 < outer < 0.08
-    assert inner is not None and 0.09 < inner < 0.5
+    assert outer is not None and 0.02 < outer < 0.25
+    assert inner is not None and 0.39 < inner < 1.0
 
 
 MODULES_WITH_FIXTURES = {

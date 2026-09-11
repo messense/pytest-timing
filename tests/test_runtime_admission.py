@@ -30,8 +30,11 @@ from pathlib import Path
 import pytest, pytest_timing
 
 def event(kind, slots=0):
-    with open("events.jsonl", "a") as out:
-        row = [time.time(), os.environ.get("PYTEST_XDIST_WORKER"), kind, slots]
+    # One file per process: concurrent appends to a shared file can clobber each
+    # other on Windows, where O_APPEND is not atomic across handles.
+    worker = os.environ.get("PYTEST_XDIST_WORKER")
+    with open(f"events-{worker or 'main'}.jsonl", "a") as out:
+        row = [time.time(), worker, kind, slots]
         out.write(json.dumps(row) + "\\n")
 
 def wait_for(path):
@@ -241,7 +244,7 @@ def test_b_dynamic(request):
     result = run_timing(pytester, "-n2", "--timing-cpus", "2", timeout=15)
     result.assert_outcomes(passed=1, failed=1)
     result.stdout.fnmatch_lines(["*timed out waiting for CPU slots*"])
-    assert not (pytester.path / "events.jsonl").exists()
+    assert not list(pytester.path.glob("events-*.jsonl"))
     doc = load_json(pytester.path)
     assert doc["run"]["cpu"]["domains"]["local"]["forced"] == 0
     failed = next(t for t in doc["tests"] if t["outcome"] == "failed")
@@ -258,7 +261,7 @@ def test_runtime_wait_is_excluded_from_test_and_fixture_estimates(
         import time, pytest, pytest_timing
         @pytest.fixture(scope="session")
         @pytest_timing.cpu(2)
-        def heavy(): time.sleep(.3)
+        def heavy(): time.sleep(.4)
         @pytest.fixture(scope="session")
         def outer(request):
             time.sleep(.02)
@@ -282,8 +285,10 @@ def test_runtime_wait_is_excluded_from_test_and_fixture_estimates(
         assert test.cpu is not None
         assert test.cpu.elapsed == pytest.approx(test.duration - test.cpu.runtime_wait, abs=0.02)
     if nested:
+        # ``outer`` keeps only its own 40ms: not the nested 0.4s set-up, nor the
+        # wait. A loaded runner stretches those 40ms to ~0.2s, hence the ceiling.
         assert all(
-            0.03 <= seconds < 0.15 for key, seconds in estimates.setups.items() if "::outer[" in key
+            0.03 <= seconds < 0.3 for key, seconds in estimates.setups.items() if "::outer[" in key
         )
 
 
@@ -660,7 +665,8 @@ def test_package_reentry_reserves_the_repeated_setup(pytester: pytest.Pytester) 
     first = run_timing(pytester, timeout=15)
     first.assert_outcomes(passed=4)
     (pytester.path / "pytest-timing.json").rename(pytester.path / "history.json")
-    (pytester.path / "events.jsonl").unlink()
+    for path in pytester.path.glob("events-*.jsonl"):
+        path.unlink()
     result = run_timing(
         pytester, "-n2", "--timing-cpus", "2", "--timing-schedule", "history.json", timeout=15
     )

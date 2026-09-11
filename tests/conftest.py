@@ -18,6 +18,16 @@ needs_xdist = pytest.mark.skipif(not HAS_XDIST, reason="pytest-xdist not install
 T0 = 1_700_000_000.0
 
 
+@pytest.fixture(autouse=True)
+def utf8_subprocess_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pytester decodes subprocess output as UTF-8; make the child encode it that way.
+
+    Without this, a Windows child writes its terminal report in the locale code page
+    (the report's "…" becomes 0x85) and ``runpytest_subprocess`` fails to decode it.
+    """
+    monkeypatch.setenv("PYTHONIOENCODING", "utf-8")
+
+
 def make_info(**overrides: object) -> RunInfo:
     base: dict[str, object] = dict(
         start=T0,
@@ -138,8 +148,11 @@ def write_history(path: pathlib.Path, durations: dict[str, float], *, stop: floa
 
 
 def events(pytester: pytest.Pytester) -> list[Any]:
+    """Every recorded event across all worker files, in time order."""
     return sorted(
-        json.loads(line) for line in (pytester.path / "events.jsonl").read_text().splitlines()
+        json.loads(line)
+        for path in pytester.path.glob("events-*.jsonl")
+        for line in path.read_text().splitlines()
     )
 
 

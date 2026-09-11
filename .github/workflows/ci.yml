@@ -7,7 +7,7 @@ on:
 
 jobs:
   test:
-    name: py${{ matrix.python }} / pytest ${{ matrix.pytest }}${{ matrix.xdist && format(' / xdist {0}', matrix.xdist) || '' }}
+    name: ${{ matrix.os }} / py${{ matrix.python }} / pytest ${{ matrix.pytest }}${{ matrix.xdist && format(' / xdist {0}', matrix.xdist) || '' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

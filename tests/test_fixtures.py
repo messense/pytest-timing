@@ -125,6 +125,7 @@ def test_shared_fixtures_are_recorded_with_scope_keys(
     result.assert_outcomes(passed=6)
     tests = by_name(load_json(pytester.path))
 
+
     assert shapes(tests["test_client"]) == {("session", "db[]"), ("module", "conn[]")}
     assert "module:test_fx.py:test_fx.py::conn[]" in tests["test_client"]["fixtures"]
     assert "fixtures" not in tests["test_plain"]

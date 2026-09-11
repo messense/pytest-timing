@@ -22,8 +22,8 @@ jobs:
           - { os: windows-latest, python: "3.12", pytest: "latest" }
           - { os: macos-latest, python: "3.13", pytest: "latest" }
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
         with:
           python-version: ${{ matrix.python }}
       - name: Install
@@ -50,8 +50,8 @@ jobs:
     name: without pytest-xdist
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
         with:
           python-version: "3.12"
       - run: uv sync --no-dev
@@ -61,8 +61,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
         with:
           python-version: "3.12"
       - run: uv sync

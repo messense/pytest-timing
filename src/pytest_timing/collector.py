@@ -17,7 +17,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from pytest_timing.model import PHASES, CpuRecord, Phase, Run, RunInfo, TestSpan, Worker
+from pytest_timing.model import (
+    PHASES,
+    CpuRecord,
+    MemoryRecord,
+    Phase,
+    Run,
+    RunInfo,
+    TestSpan,
+    Worker,
+)
 
 CRASH_WHEN = "???"  # xdist synthesises a report with this ``when`` for crashed items
 RETRIED = "rerun"
@@ -38,6 +47,7 @@ class PhaseReport:
     received: float = 0.0  # epoch seconds when the controller saw the report
     fixtures: dict[str, float | None] | None = None  # shared fixtures, setup and call
     cpu: dict[str, Any] | None = None  # the worker's CPU record, on the teardown report
+    memory: dict[str, Any] | None = None  # the worker's memory record, likewise
     execution: tuple[int, int] | None = None  # collection index, attempt on that worker
 
 
@@ -131,6 +141,8 @@ class Collector:
             span.fixtures.update(report.fixtures)
         if report.cpu:
             span.cpu = CpuRecord.from_dict(report.cpu)
+        if report.memory:
+            span.memory = MemoryRecord.from_dict(report.memory)
         span.start = min(span.start, start)
         span.stop = max(span.stop, stop)
         self._apply_outcome(span, report)

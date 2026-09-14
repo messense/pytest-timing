@@ -1,4 +1,4 @@
-"""CPU declarations and per-test measurement in the process running the tests.
+"""CPU declarations and per-test CPU and memory measurement where the tests run.
 
 Declarations precede xdist collection reports. Dynamic fixture setup requests
 reserve slots before execution; holds follow actual setup/finalization events.
@@ -16,11 +16,13 @@ import pytest
 
 from pytest_timing import xdist_compat
 from pytest_timing.fixtures import FixtureTimer, _key_for, defined_at, fixture_key, fixturedefs
-from pytest_timing.telemetry import Pressure, ProcessTreeClock, host_cpu
+from pytest_timing.telemetry import MemorySampler, Pressure, ProcessTreeClock, host_cpu
 
 MARKER = "timing_cpu"
 FIXTURE_ATTR = "_pytest_timing_cpu"
 REPORT_ATTR = "timing_cpu"
+MEMORY_ATTR = "timing_memory"
+"""Report attribute carrying the attempt's resident-memory window, on teardown."""
 EXECUTION_ATTR = "timing_execution"
 """Private report identity: collection index and attempt, including retries."""
 EVENT = "timing_cpu"
@@ -237,7 +239,7 @@ class Declarations:
 
 
 class CpuMeter:
-    """Measures each test's CPU work and attaches it to the teardown report.
+    """Measures each test's CPU work and memory and attaches them to the teardown report.
 
     Runs wherever tests run: in every xdist worker, or in the main process without
     xdist. After collection it also sends the :class:`Declarations` to the controller
@@ -255,6 +257,9 @@ class CpuMeter:
     set-up's slots (``timing_request``) before the set-up starts and blocks until
     they are granted (``timing_grant``), so such a set-up goes through the same
     gate as a declared one.
+
+    ``memory`` samples resident memory from set-up to the teardown report; the
+    window (``timing_memory``) goes on that report next to the CPU record.
     """
 
     def __init__(
@@ -263,11 +268,13 @@ class CpuMeter:
         send: Callable[[str, dict[str, Any]], None] | None = None,
         clock: ProcessTreeClock | None = None,
         pressure: Pressure | None = None,
+        memory: MemorySampler | None = None,
     ) -> None:
         self.timer = timer
         self.send = send
         self.clock = clock or ProcessTreeClock()
         self.pressure = pressure or Pressure()
+        self.memory = memory
         self.declarations: Declarations | None = None
         self.cancelled: set[int] = set()  # item indices withdrawn by the controller
         self._live = False  # can the controller reach this worker while a test runs
@@ -427,6 +434,8 @@ class CpuMeter:
         self._started = time.perf_counter()
         self._work = self.clock.seconds()
         self._throttled = self.pressure.throttled()
+        if self.memory is not None:
+            self.memory.begin()
 
     @pytest.hookimpl(hookwrapper=True)
     def pytest_runtest_makereport(self, item: pytest.Item, call: Any) -> Generator[None, Any, None]:
@@ -436,6 +445,18 @@ class CpuMeter:
             setattr(outcome.get_result(), EXECUTION_ATTR, (index, self._attempts.get(index, 0)))
         if call.when != "teardown" or not self._started:
             return
+        window = self.memory.end() if self.memory is not None else None
+        if window is not None:
+            setattr(
+                outcome.get_result(),
+                MEMORY_ATTR,
+                {
+                    "base": window.base,
+                    "peak": window.peak,
+                    "after": window.after,
+                    "coverage": window.coverage,
+                },
+            )
         elapsed = max(0.0, time.perf_counter() - self._started - self.timer.wait)
         work = self.clock.seconds() - self._work - self.timer.wait_work
         throttled_now = self.pressure.throttled()
@@ -456,3 +477,7 @@ class CpuMeter:
         }
         setattr(outcome.get_result(), REPORT_ATTR, record)
         self._started = 0.0
+
+    def pytest_unconfigure(self) -> None:
+        if self.memory is not None:
+            self.memory.close()

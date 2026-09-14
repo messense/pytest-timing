@@ -373,6 +373,43 @@ naming it in `/proc/self/cgroup` wins over the `0::` v2 line, whose hierarchy ha
 controller there. Throttling is read from the same group's `cpu.stat` (`throttled_usec`
 on v2, `throttled_time` in nanoseconds on v1).
 
+## Memory admission
+
+Memory goes through the same gate as CPU, as a second `Admission` per domain counted
+in bytes, and a test is granted only when its reservation fits both: `_raise` checks
+every gate with `fits` first and reserves on all of them or none, and a refused worker
+waits in every line with its respective need. Reservations, releases, forced
+admissions, withdrawals and stall resolution act on both gates in step, so their
+`busy` and `idle` states never disagree. The rules that let CPU admission exceed its
+limit are safe for memory for the same reasons they are safe for CPU: backfilling
+never exceeds the limit (it lends out slots pledged to the head), a request above the
+limit is clamped so the test runs alone rather than never, and a forced admission
+happens only when nothing runs in the domain, so nothing else's memory is at risk.
+Pressure feedback moves only the CPU limit.
+
+Demand comes from history, never from declarations. `Estimates.from_run` keeps, per
+test, the largest `peak - base` any attempt showed (the worst case is what an
+out-of-memory kill depends on), and per shared fixture key the memory the attempt that
+paid its set-up kept resident (`after - base`, split evenly when one attempt paid for
+several). `Costs.charge` adds a `memory` to each `Charge`: the test's rise plus what
+the fixtures alive around it keep, projected through the lane's fixture state exactly
+as CPU holds are, since workers report nothing about memory at run time. A fixture with
+recorded memory belongs to its tests' families even when its set-up was too quick to
+matter for time. `_need_memory` is the twin of `_need`; an idle worker reserves what
+its fixtures keep, and a worker whose next test could never fit next to what the
+other workers' fixtures keep is parked like one blocked by CPU holds. A fixture
+reached at run time adds its recorded memory to the queued charges when its
+request is granted.
+
+The budget is `--timing-memory`: a size, or `auto`, which takes 80% of the smallest
+memory the domain's workers report (physical memory capped by the cgroup limit,
+`memory.max` on v2 and `memory.limit_in_bytes` on v1, read like the CPU quota). The
+share is deliberate: estimates are rises above each worker's footprint, and the
+footprints, the controller and the rest of the host are not in them. Without a
+recorded run every estimate is zero and the gate admits everything; the summary says
+so. The planner ignores memory: with tests kept apart by the gate, balancing lanes by
+memory would add little, and the lane plan can still move.
+
 ## Measuring CPU work
 
 `ProcessTreeClock` uses `os.times()` for worker CPU time and, on POSIX, reaped child

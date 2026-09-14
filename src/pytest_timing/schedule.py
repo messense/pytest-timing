@@ -77,6 +77,8 @@ class Estimates:
     source: str = ""  # where the estimates came from, for the terminal summary
     families: dict[str, Family] = field(default_factory=dict)  # nodeid -> fixture keys
     setups: dict[str, float] = field(default_factory=dict)  # fixture key -> seconds
+    memory: dict[str, int] = field(default_factory=dict)  # nodeid -> bytes it rose by
+    retained: dict[str, int] = field(default_factory=dict)  # fixture key -> bytes kept
 
     @classmethod
     def from_run(cls, run: Run, source: str = "") -> Estimates:
@@ -86,16 +88,31 @@ class Estimates:
         best rank present is used. The median is robust to the odd slow attempt, and it
         does not grow with the number of attempts the way the longest one does, so a
         history merged from many runs stays comparable to a single run.
+
+        Memory is the opposite: the largest rise any attempt showed, since the worst
+        case is what an out-of-memory kill depends on. What an attempt kept resident
+        after paying for shared set-ups is attributed to those fixtures, split evenly
+        when it paid for several at once, again keeping the largest.
         """
         attempts: dict[str, dict[int, list[float]]] = {}  # nodeid -> rank -> own seconds
         families: dict[str, set[str]] = {}
         setups: dict[str, list[float]] = {}
+        memory: dict[str, int] = {}
+        retained: dict[str, int] = {}
         for test in run.tests:
+            paid = []
             if test.fixtures:
                 families.setdefault(test.nodeid, set()).update(test.fixtures)
                 for key, seconds in test.fixtures.items():
                     if seconds:
                         setups.setdefault(key, []).append(seconds)
+                        paid.append(key)
+            if test.memory is not None:
+                memory[test.nodeid] = max(memory.get(test.nodeid, 0), test.memory.rise)
+                if paid and test.memory.retained:
+                    share = test.memory.retained // len(paid)
+                    for key in paid:
+                        retained[key] = max(retained.get(key, 0), share)
             if test.outcome == "crashed":
                 continue  # the recorded stop is the worker's death, not the test's
             own = test.duration - test.shared_setup
@@ -115,6 +132,8 @@ class Estimates:
             source,
             {nodeid: frozenset(keys) for nodeid, keys in families.items()},
             {key: median(seconds) for key, seconds in setups.items()},
+            memory,
+            retained,
         )
 
     @classmethod
@@ -144,15 +163,29 @@ class Estimates:
         """How many of ``nodeids`` have a recorded duration."""
         return sum(1 for nodeid in nodeids if nodeid in self.durations)
 
+    def rise(self, nodeid: str) -> int:
+        """Bytes the test needed on top of its worker's footprint; unknown is zero."""
+        return self.memory.get(nodeid, 0)
+
+    def kept(self, key: str) -> int:
+        """Bytes a shared fixture instance keeps resident while alive; unknown is zero."""
+        return self.retained.get(key, 0)
+
 
 class Costs:
-    """The cost model over one collection: own durations, families, set-ups, slots.
+    """The cost model over one collection: own durations, families, set-ups, slots,
+    and memory.
 
     ``declarations`` (from the workers, see :mod:`pytest_timing.demand`) add the
     CPU side: slots per test, and per fixture definition the slots its set-up needs
     and the slots it holds while alive. A fixture with a declaration belongs to its
     tests' families even when no run has timed it yet; one a recorded run reports a
     test using without naming it (``getfixturevalue``) is matched by definition.
+
+    Memory comes from history alone: the bytes each test rose by, and the bytes each
+    shared fixture instance keeps resident. A fixture kept for its memory belongs to
+    its tests' families like a declared one, so the planner keeps it alive on the
+    lane that pays for it and the gate knows it is there.
     """
 
     def __init__(
@@ -182,11 +215,20 @@ class Costs:
         self.slots: list[int] = [
             max(1, decl.tests[i]) if i < len(decl.tests) else 1 for i in range(len(collection))
         ]
+        self.memory: list[int] = [estimates.rise(nodeid) for nodeid in collection]
+        self.retained: dict[str, int] = {}  # fixture key -> bytes kept while alive
         self.family: list[Family] = []
         for index, nodeid in enumerate(collection):
-            keys = [k for k in estimates.family(nodeid) if estimates.setup(k) >= MIN_SETUP_SECONDS]
+            keys = [
+                k
+                for k in estimates.family(nodeid)
+                if estimates.setup(k) >= MIN_SETUP_SECONDS or estimates.kept(k)
+            ]
             keys += [k for k in decl.families.get(index, ()) if k not in keys]
             self.family.append(frozenset(keys) if keys else NO_FIXTURES)
+            for key in keys:
+                if estimates.kept(key):
+                    self.retained[key] = estimates.kept(key)
         self.setup: Callable[[str], float] = estimates.setup
         self.shared = sorted({key for family in self.family for key in family})
         self.setup_slots: dict[str, int] = {}  # key base -> slots its set-up needs
@@ -231,6 +273,14 @@ class Costs:
     def hold(self, keys: Iterable[str]) -> int:
         return sum(self.holds.get(key_base(key), 0) for key in keys)
 
+    def kept_memory(self, keys: Iterable[str]) -> int:
+        """Bytes the fixture instances behind ``keys`` keep resident together."""
+        return sum(self.retained.get(key, 0) for key in keys)
+
+    @property
+    def any_memory(self) -> bool:
+        return any(self.memory) or bool(self.retained)
+
     def charge(self, index: int, fixtures: Iterable[str]) -> Charge:
         """One fixture transition, with its time, CPU work and peak reservation."""
         before = frozenset(fixtures)
@@ -253,6 +303,7 @@ class Costs:
             work=work,
             before=before,
             after=frozenset(alive),
+            memory=self.memory[index] + self.kept_memory(alive),
         )
 
     def project(self, indices: Iterable[int], state: Projection | None = None) -> Projection:
@@ -285,6 +336,7 @@ class Charge:
     work: float = 0.0  # projected slot-seconds, refunded if this queued test is stolen
     before: Family = NO_FIXTURES  # fixture checkpoint before dispatch
     after: Family = NO_FIXTURES
+    memory: int = 0  # bytes: the test's rise plus what the fixtures alive around it keep
 
     def with_live_holds(self, live: int) -> int:
         """Include unexpected live holds without counting declared holds twice."""

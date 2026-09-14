@@ -80,6 +80,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "Implies --timing.",
     )
     group.addoption(
+        "--timing-memory",
+        metavar="SIZE|auto",
+        default=None,
+        help="In xdist load/worksteal mode, admit tests against a budget of SIZE bytes of "
+        "memory per host (suffixes K, M, G, T; 'auto' takes 80%% of physical memory or the "
+        "cgroup limit), using the memory each test needed in the run at --timing-schedule. "
+        "Implies --timing.",
+    )
+    group.addoption(
         "--timing-top",
         type=int,
         default=None,
@@ -124,12 +133,47 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "CPU slots per host for xdist admission, or 'auto' (implies timing).",
         default="",
     )
+    parser.addini(
+        "timing_memory",
+        "Memory budget per host for xdist admission (bytes, K/M/G/T), or 'auto' (implies timing).",
+        default="",
+    )
     parser.addini("timing_top", "Rows in the slowest-tests section.", default="")
     parser.addini("timing_min", "Minimum duration for the slowest-tests section.", default="")
     parser.addini("timing_ascii_style", "unicode or ascii.", default="")
 
 
 _TRUE = ("1", "true", "yes", "on")
+_UNITS = {"k": 2**10, "m": 2**20, "g": 2**30, "t": 2**40}
+
+
+def parse_memory(text: str) -> int | Literal["auto"]:
+    """``auto``, a byte count, or one with a binary suffix: ``512M``, ``8G``, ``2GiB``."""
+    value = text.strip().lower()
+    if value == "auto":
+        return "auto"
+    number = value.removesuffix("ib").removesuffix("b")
+    unit = 1
+    if number and number[-1] in _UNITS:
+        unit = _UNITS[number[-1]]
+        number = number[:-1]
+    try:
+        size = float(number) * unit
+    except ValueError:
+        size = 0.0
+    if size < 1:
+        raise pytest.UsageError(
+            f"timing_memory must be a size such as 512M or 8G, or 'auto', not {text!r}"
+        )
+    return int(size)
+
+
+def format_bytes(size: float) -> str:
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if size < 1024 or unit == "TiB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TiB"
 
 
 class Settings:
@@ -155,6 +199,10 @@ class Settings:
                 raise pytest.UsageError(
                     f"timing_cpus must be a positive integer or 'auto', not {cpus!r}"
                 )
+        memory = self._value(config, "timing_memory")
+        self.memory: int | Literal["auto"] | None = (
+            parse_memory(str(memory)) if memory is not None else None
+        )
         top = self._value(config, "timing_top")
         self.top = int(top) if top is not None else DEFAULT_TOP
         minimum = self._value(config, "timing_min")
@@ -175,6 +223,7 @@ class Settings:
             or self.outputs
             or self.schedule is not None
             or self.cpus is not None
+            or self.memory is not None
         )
 
     @staticmethod
@@ -289,7 +338,7 @@ class TimingPlugin:
         else:
             if self.settings.schedule is not None:
                 self.schedule_note = "schedule: needs pytest-xdist workers (-n); not applied"
-            elif self.settings.cpus is not None:
+            elif self.settings.cpus is not None or self.settings.memory is not None:
                 self.schedule_note = "cpu: a budget needs pytest-xdist workers (-n); not applied"
             now = time.time()
             self.collector.worker_started(MAIN_LANE, self.collector.run.start)
@@ -434,7 +483,7 @@ class TimingPlugin:
         session is read before this session overwrites it.
         """
         path = self.settings.schedule
-        admission = self.settings.cpus is not None
+        admission = self.settings.cpus is not None or self.settings.memory is not None
         if path is None and not admission:
             return None
         dist = config.getoption("dist", None)
@@ -460,6 +509,7 @@ class TimingPlugin:
 
         cpu = CpuSetup(
             cpus=self.settings.cpus,
+            memory=self.settings.memory,
             declarations=self._declarations_for,
             domain_of=xdist_compat.domain_of,
             pressure=Pressure(),
@@ -493,7 +543,40 @@ class TimingPlugin:
         cpu = self._cpu_summary()
         if cpu is not None:
             lines.append(cpu)
+        memory = self._memory_summary()
+        if memory is not None:
+            lines.append(memory)
         return lines
+
+    def _memory_summary(self) -> str | None:
+        scheduler = self.scheduler
+        summary = scheduler.memory_summary() if scheduler is not None else None
+        if summary is None:
+            return None
+        if not summary["gated"]:
+            return "memory: no budget could be detected; not applied"
+        parts: list[str] = []
+        for name, domain in summary["domains"].items():
+            text = f"{name}: budget {format_bytes(domain['budget'])}"
+            if domain.get("host"):
+                text += f" of {format_bytes(domain['host'])}"
+            clamped = domain.get("clamped")
+            if clamped:
+                text += f", {clamped} test{'s' if clamped != 1 else ''} over budget run alone"
+            if domain.get("forced"):
+                text += f", {domain['forced']} forced"
+            parts.append(text)
+        line = "memory: " + "; ".join(parts)
+        known, total = summary["known_tests"], summary["tests"]
+        if known:
+            line += f"; {known} of {total} tests had recorded memory"
+            line += f", largest {format_bytes(summary['largest'])}"
+        else:
+            line += "; no recorded memory in the schedule history yet"
+        if summary["waited_tests"] and not (scheduler is not None and scheduler.admissions):
+            n = summary["waited_tests"]
+            line += f"; {n} test{'s' if n != 1 else ''} waited {summary['waited']:.2f}s for memory"
+        return line
 
     def _cpu_summary(self) -> str | None:
         scheduler = self.scheduler
@@ -522,6 +605,8 @@ class TimingPlugin:
             if clamped:
                 text += f", {clamped} request{'s' if clamped != 1 else ''} over budget run alone"
             parts.append(text)
+        if not parts:
+            return None  # no CPU budget: a memory budget alone has its own line
         line = "cpu: " + "; ".join(parts)
         line += f"; {heavy} test{'s' if heavy != 1 else ''} over one slot"
         if summary["waited_tests"]:
@@ -589,6 +674,7 @@ class TimingPlugin:
                     wait.seconds,
                 )
             self.collector.run.cpu = scheduler.cpu_summary()
+            self.collector.run.memory = scheduler.memory_summary()
         elif not self.distributed:
             self.collector.run.cpu = {
                 "gated": False,

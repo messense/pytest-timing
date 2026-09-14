@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import time
@@ -24,25 +25,39 @@ def touch(mib: int) -> bytearray:
     return big
 
 
-def test_memory_sampler_sees_what_this_process_allocates() -> None:
+IN_PROCESS = """
+import json, time
+from pytest_timing.telemetry import MemorySampler
+sampler = MemorySampler()
+assert sampler.end() is None  # nothing open yet
+assert sampler.begin()
+big = bytearray(64 * 1024 * 1024); big[::4096] = b"x" * len(big[::4096])
+time.sleep(0.05)
+del big
+window = sampler.end()
+sampler.close()
+print(json.dumps({"base": window.base, "peak": window.peak, "after": window.after,
+                  "coverage": window.coverage}))
+"""
+
+
+def test_memory_sampler_sees_what_a_process_allocates() -> None:
     sampler = MemorySampler()
     assert sampler.coverage in ("tree", "self", "none")
     if sampler.coverage == "none":
         assert not sampler.begin() and sampler.end() is None
-        pytest.skip("platform reports no resident memory")
-    try:
-        assert sampler.end() is None  # nothing open yet
-        assert sampler.begin()
-        big = touch(64)
-        time.sleep(0.05)
-        del big
-        window = sampler.end()
-    finally:
         sampler.close()
-    assert window is not None
-    assert window.coverage == sampler.coverage
-    assert window.peak - window.base >= 48 * MIB  # kept the peak, not the end
-    assert window.after >= window.base
+        pytest.skip("platform reports no resident memory")
+    sampler.close()
+    # In a fresh interpreter: this process has run half a test suite by now, and a
+    # grown heap (or a loaded host compressing its pages) can absorb the allocation.
+    output = subprocess.run(
+        [sys.executable, "-c", IN_PROCESS], check=True, capture_output=True, text=True
+    ).stdout
+    window = json.loads(output)
+    assert window["coverage"] == sampler.coverage
+    assert window["peak"] - window["base"] >= 48 * MIB  # kept the peak, not the end
+    assert window["after"] >= window["base"] > 0
 
 
 def test_memory_sampler_counts_a_live_child_where_it_can() -> None:

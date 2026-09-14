@@ -85,10 +85,13 @@ optimistic there.
 
 `Estimates.from_run` subtracts shared set-up and runtime admission waits from each
 attempt's duration to estimate the test's *own* time. Crashed attempts and nonpositive
-results are excluded. For each node id it uses the longest clean attempt, or the
-longest contended attempt when no clean one exists. Tests without a usable estimate
-get the mean of those estimates, or zero if none exist. Fixture dependencies are
-combined across attempts, and each fixture key's set-up cost is the longest recorded.
+results are excluded. For each node id it ranks the attempts clean before contended
+and passing before failing, and takes the median of the best rank present: a failed
+attempt usually stops early, and the longest attempt grows with the number of
+attempts, so a history merged from several runs would drift upward. Tests without a
+usable estimate get the mean of those estimates, or zero if none exist. Fixture
+dependencies are combined across attempts, and each fixture key's set-up cost is the
+median of the recorded ones.
 
 A missing or unreadable history file leaves xdist's scheduler in place unless an
 explicit CPU budget was requested. With that budget the custom scheduler still runs,

@@ -1,4 +1,4 @@
-"""Drive xdist with fixture-aware planning and CPU admission.
+"""Drive xdist with fixture-aware planning and CPU and memory admission.
 
 A worker needs its next item before starting the current one. Dispatch therefore
 admits the preceding item first; shutdown admits or withdraws the final item.
@@ -50,14 +50,22 @@ the controller to rebalance. The bound is scaled down for short suites (``_budge
 SAMPLE_INTERVAL = 1.0
 """Seconds between pressure samples used for admission feedback."""
 
+AUTO_MEMORY_SHARE = 0.8
+"""``--timing-memory auto``: this share of what the host offers is the budget. Memory
+estimates are rises above each worker's footprint, and those footprints, the
+controller, and whatever else the host runs are not in the estimates."""
+
 
 @dataclass
 class CpuSetup:
-    """How the scheduler learns about CPU: the budget, the declarations, the host."""
+    """How the scheduler learns about CPU and memory: budgets, declarations, hosts."""
 
     # Slots per domain: a number, "auto" (detect per host and enforce it, even
     # below the worker count), or None (gate only when something declares CPU).
     cpus: int | Literal["auto"] | None = None
+    # Bytes per domain: a number, "auto" (a share of what each host offers), or
+    # None (no memory gate). Demand comes from recorded history, never declarations.
+    memory: int | Literal["auto"] | None = None
     declarations: Callable[[Any], Declarations | None] = field(default=lambda node: None)
     domain_of: Callable[[Any], str] = field(default=lambda node: "local")
     pressure: Pressure | None = None  # the controller host's signals, for ``local``
@@ -112,9 +120,10 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
         # Work stealing: one request in flight at a time, and who is waiting for work.
         self.steal_requested_from_node: WorkerController | None = None
         self.starving: list[WorkerController] = []
-        # CPU admission: one budget per domain, a reservation per worker.
+        # CPU and memory admission: one budget per domain each, a reservation per worker.
         self.declarations: Declarations | None = None
         self.admissions: dict[str, Admission] = {}
+        self.memory_admissions: dict[str, Admission] = {}
         self.domain: dict[WorkerController, str] = {}
         self.hosts: dict[str, dict[str, Any]] = {}  # what each domain's workers detected
         self.waiting: dict[WorkerController, float] = {}  # since when its head waits
@@ -281,8 +290,7 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
         self.live_holds.pop(node, None)
         self.waiting.pop(node, None)
         self.rates.pop(xdist_compat.node_id(node), None)
-        admission = self._admission(node)
-        if admission is not None:
+        for admission in self._gates(node):
             admission.release(node)
 
     def _budget(self) -> float:
@@ -362,6 +370,8 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
             return out
         limit_slots = self._limit(node)
         elsewhere = self._held_elsewhere(node) if limit_slots and costs.holds else 0
+        limit_bytes = self._memory_limit(node)
+        kept_elsewhere = self._kept_elsewhere(node) if limit_bytes and costs.retained else 0
         while self.pending and len(out) < limit and self._wants_more(node):
             if not lane.plan:
                 if not borrow:
@@ -374,7 +384,10 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
                 charge = costs.charge(index, lane.fixtures)
                 # Could it never run here while the other workers keep what they
                 # hold now? Only their exit would make room: pass it over.
-                if not elsewhere or min(charge.peak, limit_slots) + elsewhere <= limit_slots:
+                if (not elsewhere or min(charge.peak, limit_slots) + elsewhere <= limit_slots) and (
+                    not kept_elsewhere
+                    or min(charge.memory, limit_bytes) + kept_elsewhere <= limit_bytes
+                ):
                     position = i
                     break
             if position is None or charge is None:
@@ -418,25 +431,38 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
             declaration = cpu.declarations(node)
             if declaration is not None and declaration.host:
                 self.hosts.setdefault(self.domain[node], dict(declaration.host))
-        if cpu.cpus is None and not self.costs.any_demand:
-            return  # nothing declares CPU and nobody asked: no gate
+        if cpu.cpus is not None or self.costs.any_demand:  # else nobody asked: no gate
+            for domain, nodes in members.items():
+                if isinstance(cpu.cpus, int):
+                    budget = cpu.cpus
+                else:
+                    detected = [
+                        int(d.host["budget"])
+                        for d in (cpu.declarations(n) for n in nodes)
+                        if d is not None and d.host.get("budget")
+                    ]
+                    budget = min(detected) if detected else len(nodes)
+                    if cpu.cpus is None:
+                        budget = max(budget, len(nodes))
+                self.admissions[domain] = Admission(budget, domain)
+        if cpu.memory is None:
+            return
         for domain, nodes in members.items():
-            if isinstance(cpu.cpus, int):
-                budget = cpu.cpus
+            if isinstance(cpu.memory, int):
+                size = cpu.memory
             else:
-                detected = [
-                    int(d.host["budget"])
+                offered = [
+                    int(d.host["memory"])
                     for d in (cpu.declarations(n) for n in nodes)
-                    if d is not None and d.host.get("budget")
+                    if d is not None and d.host.get("memory")
                 ]
-                budget = min(detected) if detected else len(nodes)
-                if cpu.cpus is None:
-                    budget = max(budget, len(nodes))
-            self.admissions[domain] = Admission(budget, domain)
+                size = int(min(offered) * AUTO_MEMORY_SHARE) if offered else 0
+            if size > 0:
+                self.memory_admissions[domain] = Admission(size, domain)
 
     @property
     def gated(self) -> bool:
-        return bool(self.admissions)
+        return bool(self.admissions or self.memory_admissions)
 
     def _slots(self) -> int | None:
         """The CPU budget the planner should pack against: all domains' limits."""
@@ -446,6 +472,38 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
 
     def _admission(self, node: WorkerController) -> Admission | None:
         return self.admissions.get(self.domain.get(node, ""))
+
+    def _memory_admission(self, node: WorkerController) -> Admission | None:
+        return self.memory_admissions.get(self.domain.get(node, ""))
+
+    def _gates(self, node: WorkerController) -> list[Admission]:
+        """The admissions ``node`` goes through: CPU and memory, whichever exist."""
+        gates = [self._admission(node), self._memory_admission(node)]
+        return [gate for gate in gates if gate is not None]
+
+    def _any_gate(self, domain: str) -> Admission | None:
+        """One of a domain's admissions, for state they keep in step (idle, held)."""
+        return self.admissions.get(domain) or self.memory_admissions.get(domain)
+
+    def _memory_limit(self, node: WorkerController) -> int:
+        admission = self._memory_admission(node)
+        return admission.limit if admission is not None else 0
+
+    def _kept_elsewhere(self, node: WorkerController) -> int:
+        """Bytes the other live workers of ``node``'s domain keep for fixtures."""
+        assert self.costs is not None
+        domain = self.domain.get(node)
+        kept = 0
+        for other, lane in self.lanes.items():
+            if (
+                other is node
+                or other.shutting_down
+                or other in self.finished
+                or self.domain.get(other) != domain
+            ):
+                continue
+            kept += self.costs.kept_memory(lane.fixtures)
+        return kept
 
     def _head_demand(self, node: WorkerController) -> int:
         assert self.costs is not None
@@ -510,20 +568,52 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
             return max(demand[i].with_live_holds(live) for i in tests)
         return self._holds(node)
 
-    def _raise(self, node: WorkerController, need: int, wait: bool = True) -> bool:
-        """Raise ``node``'s reservation to ``need`` through the gate; ``wait`` puts
-        a refused worker in line, to be retried at the next release."""
+    def _need_memory(self, node: WorkerController, tests: list[int]) -> int:
+        """Bytes ``node`` must hold to run ``tests``; idle, what its fixtures keep.
+
+        Fixture memory is projected through the queue: unlike CPU holds, workers
+        report nothing about it, so the lane's fixture state stands in."""
+        assert self.costs is not None
+        withdrawn = self.cancelled.get(node)
+        if withdrawn:
+            tests = [i for i in tests if i not in withdrawn]
+        if tests:
+            demand = self.dispatched[node]
+            return max(demand[i].memory for i in tests)
+        return self.costs.kept_memory(self.lanes[node].fixtures)
+
+    def _needs(self, node: WorkerController, tests: list[int]) -> list[tuple[Admission, int]]:
+        """Each of ``node``'s gates with what ``tests`` need from it."""
+        needs = []
         admission = self._admission(node)
-        assert admission is not None
+        if admission is not None:
+            needs.append((admission, self._need(node, tests)))
+        memory = self._memory_admission(node)
+        if memory is not None:
+            needs.append((memory, self._need_memory(node, tests)))
+        return needs
+
+    def _raise(
+        self, node: WorkerController, needs: list[tuple[Admission, int]], wait: bool = True
+    ) -> bool:
+        """Raise ``node``'s reservations to ``needs`` through the gates, all or none;
+        ``wait`` puts a refused worker in every line, to be retried at the next
+        release. A rise that fits one gate but not the other takes nothing."""
+        assert needs
         lane = self.lanes[node]
-        held = admission.held(node)
-        if need <= held:
-            admission.assign(node, held, lane.free, busy=True)
-        elif not admission.reserve(node, need, lane.free, finish=lane.free):
+        rising = [(gate, need) for gate, need in needs if need > gate.held(node)]
+        if not all(gate.fits(node, need, lane.free) for gate, need in rising):
             if wait:
                 since = self.waiting.setdefault(node, self.clock())
-                admission.wait(node, need, since)
+                for gate, need in needs:
+                    gate.wait(node, need, since)
             return False
+        for gate, need in needs:
+            if need > gate.held(node):
+                reserved = gate.reserve(node, need, lane.free, finish=lane.free)
+                assert reserved  # it fit a moment ago, and nothing has changed since
+            else:
+                gate.assign(node, gate.held(node), lane.free, busy=True)
         self._admitted(node)
         return True
 
@@ -535,19 +625,17 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
         worker is busy, and the slots would idle until it got there. A refusal at the
         head puts the worker in line.
         """
-        admission = self._admission(node)
         queue = self.node2pending[node]
-        if admission is None or not queue:
+        if not self._gates(node) or not queue:
             return True
-        need = self._need(node, queue)
-        if need > admission.held(node) and len(queue) > 1:
+        needs = self._needs(node, queue)
+        if len(queue) > 1 and any(need > gate.held(node) for gate, need in needs):
             return False
-        return self._raise(node, need)
+        return self._raise(node, needs)
 
     def _admitted(self, node: WorkerController) -> None:
-        admission = self._admission(node)
-        if admission is not None:
-            admission.admitted(node)
+        for gate in self._gates(node):
+            gate.admitted(node)
         since = self.waiting.pop(node, None)
         if since is not None:
             queue = self.node2pending[node]
@@ -560,14 +648,16 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
 
     def _reserve(self, node: WorkerController) -> None:
         """Recompute ``node``'s reservation from what it may run without another word."""
-        admission = self._admission(node)
-        if admission is None or node not in self.node2pending or node in self.finished:
+        if not self._gates(node) or node not in self.node2pending or node in self.finished:
             return
+        free = self.lanes[node].free
         if node.shutting_down and not self.node2pending[node]:
-            admission.assign(node, 0, self.lanes[node].free, busy=False)  # about to exit
+            for gate in self._gates(node):
+                gate.assign(node, 0, free, busy=False)  # about to exit
             return
         granted = self._granted(node)
-        admission.assign(node, self._need(node, granted), self.lanes[node].free, bool(granted))
+        for gate, need in self._needs(node, granted):
+            gate.assign(node, need, free, bool(granted))
 
     def _shutdown(self, node: WorkerController) -> None:
         """Shut ``node`` down once everything it holds may run.
@@ -596,9 +686,8 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
         the controller, is withdrawn (the worker skips it); a worker that cannot
         be told runs it anyway, counted as a forced admission.
         """
-        admission = self._admission(node)
         queue = self.node2pending.get(node)
-        if admission is None or not queue:
+        if not self._gates(node) or not queue:
             return
         lane = self.lanes[node]
         if node in self.requests:
@@ -606,18 +695,20 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
             # still waits for its grant; completion or worker exit frees the slots.
             self._reserve(node)
             return
-        need = self._need(node, queue)
-        if self._raise(node, need, wait=False):
+        needs = self._needs(node, queue)
+        if self._raise(node, needs, wait=False):
             return
         tail = queue[-1]
         if xdist_compat.cancel_tests(node, [tail]):
             self.cancelled.setdefault(node, set()).add(tail)
             self.withdrawn += 1
             self.waiting.pop(node, None)  # it never ran: no wait to record
-            admission.admitted(node)
-            admission.assign(node, self._need(node, queue), lane.free, busy=len(queue) > 1)
+            for gate, need in self._needs(node, queue):
+                gate.admitted(node)
+                gate.assign(node, need, lane.free, busy=len(queue) > 1)
             return
-        admission.assign(node, need, lane.free, busy=True)  # over the limit: counted
+        for gate, need in needs:
+            gate.assign(node, need, lane.free, busy=True)  # over the limit: counted
         self._admitted(node)
 
     def _admit_waiting(self) -> None:
@@ -637,8 +728,9 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
         letting go of holds or by going over the limit. A parked worker is shut
         down first: its exit releases what it holds and its plan moves on. Failing
         that, the oldest head is admitted over the limit, counted as forced."""
-        for domain, admission in self.admissions.items():
-            if not admission.idle:
+        for domain in {*self.admissions, *self.memory_admissions}:
+            admission = self._any_gate(domain)
+            if admission is None or not admission.idle:
                 continue
             candidates = sorted(
                 (
@@ -669,17 +761,17 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
     def _force(self, node: WorkerController) -> None:
         """Admit ``node``'s head, or the request its running test is blocked on,
         over the limit: nothing else can move. Counted by ``assign``."""
-        admission = self._admission(node)
-        assert admission is not None and self.costs is not None
+        assert self.costs is not None
         lane = self.lanes[node]
         request = self.requests.get(node)
         if request is not None:
-            need = self._request_need(node, request.index, request.setup, request.hold)
-            admission.assign(node, need, lane.free, busy=True)
+            for gate, need in self._request_needs(node, request):
+                gate.assign(node, need, lane.free, busy=True)
             self._complete_request(node)
             return
         queue = self.node2pending[node]
-        admission.assign(node, self._need(node, queue), lane.free, busy=True)
+        for gate, need in self._needs(node, queue):
+            gate.assign(node, need, lane.free, busy=True)
         self._admitted(node)
         self.check_schedule(node)  # its next test, or its shutdown, may go out now
 
@@ -706,10 +798,9 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
         asking at once therefore take turns instead of deadlocking on the slots
         of the tests they are blocked in.
         """
-        admission = self._admission(node)
         if node in self.finished:
             return
-        if admission is None or node not in self.node2pending or self.costs is None:
+        if not self._gates(node) or node not in self.node2pending or self.costs is None:
             xdist_compat.grant_slots(node, key, request_id)  # nothing to gate
             return
         if holds is not None:
@@ -754,10 +845,35 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
             granted.append(index)
         return max(self._need(node, granted) + hold, setup + self._holds(node))
 
+    def _request_memory(self, node: WorkerController, index: int, key: str) -> int:
+        """Execution next to the fixture's recorded memory, once it is alive."""
+        assert self.costs is not None
+        queue = self.node2pending[node]
+        granted = list(queue) if xdist_compat.shutdown_was_sent(node) else queue[:-1]
+        if index not in granted:
+            granted.append(index)
+        return self._need_memory(node, granted) + self.costs.retained.get(key, 0)
+
+    def _request_needs(
+        self, node: WorkerController, request: FixtureRequest
+    ) -> list[tuple[Admission, int]]:
+        needs = []
+        admission = self._admission(node)
+        if admission is not None:
+            needs.append(
+                (
+                    admission,
+                    self._request_need(node, request.index, request.setup, request.hold),
+                )
+            )
+        memory = self._memory_admission(node)
+        if memory is not None:
+            needs.append((memory, self._request_memory(node, request.index, request.key)))
+        return needs
+
     def _retry_request(self, node: WorkerController) -> bool:
         request = self.requests[node]
-        need = self._request_need(node, request.index, request.setup, request.hold)
-        if not self._raise(node, need):
+        if not self._raise(node, self._request_needs(node, request)):
             return False
         self._complete_request(node)
         return True
@@ -784,8 +900,10 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
             demand[index] = demand[index].adding_fixture(setup, hold, holds)
             return
         self.costs.learn(key, setup, hold)
+        kept = self.costs.retained.get(key, 0)
         for other in demand:
-            demand[other] = demand[other].adding_fixture(0, hold, 0)
+            charge = demand[other].adding_fixture(0, hold, 0)
+            demand[other] = replace(charge, memory=charge.memory + kept)
         current = demand[index]
         demand[index] = replace(current, peak=max(current.peak, setup + holds))
         queue = self.node2pending[node]
@@ -836,6 +954,31 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
             "waited": round(sum(w.seconds for w in self.waits), 6),
             "waited_tests": len({(w.worker, w.index, w.attempt) for w in self.waits}),
             "cancelled": self.withdrawn,
+        }
+
+    def memory_summary(self) -> dict[str, Any] | None:
+        """What happened on the memory side, for the run's metadata and the summary."""
+        if self.cpu is None or self.cpu.memory is None:
+            return None
+        domains: dict[str, Any] = {}
+        for domain, admission in self.memory_admissions.items():
+            domains[domain] = admission.summary()
+            offered = (self.hosts.get(domain) or {}).get("memory")
+            if offered:
+                domains[domain]["host"] = int(offered)
+        known = largest = total = 0
+        if self.costs is not None and self.collection is not None:
+            total = len(self.collection)
+            known = sum(1 for nodeid in self.collection if nodeid in self.estimates.memory)
+            largest = max(self.costs.memory, default=0)
+        return {
+            "gated": bool(self.memory_admissions),
+            "domains": domains,
+            "tests": total,
+            "known_tests": known,
+            "largest": largest,
+            "waited": round(sum(w.seconds for w in self.waits), 6),
+            "waited_tests": len({(w.worker, w.index, w.attempt) for w in self.waits}),
         }
 
     def _check_stealing(self, node: WorkerController) -> None:

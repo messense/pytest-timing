@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Memory-aware admission under pytest-xdist. `--timing-memory SIZE|auto` (ini
+  `timing_memory`, env `PYTEST_TIMING_MEMORY`) sets a memory budget per host, and the
+  memory each test needed in the run at `--timing-schedule` keeps tests apart whose
+  recorded needs would not fit in it together. Nothing is declared: the first run
+  records, the next one gates. Memory and CPU budgets are checked together, so a
+  test starts only when both fit. A shared fixture keeps what its first test left
+  resident reserved while it is alive. The run's JSON gains `memory` with the budget
+  and admission summary.
 - On macOS, CPU time and memory of live subprocesses are read through `libproc`
   instead of psutil. psutil's child listing scans the whole process table, and the
   CPU clock is read several times per test: with psutil installed, `--timing` on

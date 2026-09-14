@@ -508,14 +508,17 @@ def test_slow(): time.sleep(0.3)
 """
 
 
-def _starts(doc: dict[str, Any]) -> dict[str, float]:
-    return {t["nodeid"].split("::")[1]: t["start"] for t in doc["tests"]}
+def _position_on_its_worker(doc: dict[str, Any], name: str) -> tuple[int, int]:
+    """(index of the test in its worker's start order, tests on that worker)."""
+    test = next(t for t in doc["tests"] if t["nodeid"].endswith("::" + name))
+    same_worker = sorted(
+        (t for t in doc["tests"] if t["worker"] == test["worker"]), key=lambda t: t["start"]
+    )
+    return same_worker.index(test), len(same_worker)
 
 
 def _first_on_its_worker(doc: dict[str, Any], name: str) -> bool:
-    test = next(t for t in doc["tests"] if t["nodeid"].endswith("::" + name))
-    same_worker = [t for t in doc["tests"] if t["worker"] == test["worker"]]
-    return min(same_worker, key=lambda t: t["start"]) is test
+    return _position_on_its_worker(doc, name)[0] == 0
 
 
 @needs_xdist
@@ -527,9 +530,10 @@ def test_second_run_starts_the_slow_test_first(pytester: pytest.Pytester) -> Non
     first.assert_outcomes(passed=7)
     first.stdout.fnmatch_lines(["schedule: no run recorded at pytest-timing.json yet; not applied"])
     doc = load_json(pytester.path)
-    starts = _starts(doc)
-    assert starts["test_slow"] == max(starts.values())  # collection order: it went last
-    assert not _first_on_its_worker(doc, "test_slow")
+    # Collection order: the slow test went last on its worker. Start times are not
+    # compared across workers, which xdist does not order.
+    position, count = _position_on_its_worker(doc, "test_slow")
+    assert count > 1 and position == count - 1
 
     second = pytester.runpytest_subprocess(*args)
     second.assert_outcomes(passed=7)

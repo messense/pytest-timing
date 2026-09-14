@@ -70,6 +70,7 @@ class HostCpu:
     cgroup: str | None  # "v2", "v1" or None
     pressure: bool  # is pressure stall information readable
     platform: str
+    memory: int | None = None  # bytes this process may use: physical, capped by cgroup
 
     @property
     def budget(self) -> int:
@@ -89,6 +90,7 @@ class HostCpu:
             "pressure": self.pressure,
             "platform": self.platform,
             "budget": self.budget,
+            "memory": self.memory,
         }
 
 
@@ -202,7 +204,84 @@ def host_cpu(pressure: Pressure | None = None) -> HostCpu:
     if sys.platform.startswith("linux"):
         cgroup, quota = cgroup_quota()
         pressure_readable = (pressure or Pressure()).some() is not None
-    return HostCpu(cpus, affinity, quota, cgroup, pressure_readable, sys.platform)
+    return HostCpu(cpus, affinity, quota, cgroup, pressure_readable, sys.platform, host_memory())
+
+
+def _physical_memory() -> int | None:
+    """Bytes of physical memory: ``sysconf`` on POSIX, ``GlobalMemoryStatusEx`` on Windows."""
+    try:
+        pages, page = os.sysconf("SC_PHYS_PAGES"), os.sysconf("SC_PAGE_SIZE")
+        if pages > 0 and page > 0:
+            return int(pages) * int(page)
+    except (ValueError, OSError, AttributeError):
+        pass
+    if sys.platform == "win32":
+        import ctypes
+
+        class Status(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_uint32),
+                ("dwMemoryLoad", ctypes.c_uint32),
+                ("ullTotalPhys", ctypes.c_uint64),
+                ("ullAvailPhys", ctypes.c_uint64),
+                ("ullTotalPageFile", ctypes.c_uint64),
+                ("ullAvailPageFile", ctypes.c_uint64),
+                ("ullTotalVirtual", ctypes.c_uint64),
+                ("ullAvailVirtual", ctypes.c_uint64),
+                ("ullAvailExtendedVirtual", ctypes.c_uint64),
+            ]
+
+        try:
+            status = Status()
+            status.dwLength = ctypes.sizeof(Status)
+            windll = ctypes.windll  # type: ignore[attr-defined,unused-ignore]
+            if windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.ullTotalPhys)
+        except (OSError, AttributeError):
+            pass
+    try:
+        import psutil  # type: ignore[import-not-found,import-untyped,unused-ignore]
+
+        return int(psutil.virtual_memory().total)
+    except Exception:
+        return None
+
+
+def _memory_max(directory: Path) -> float | None:
+    text = _read(directory / "memory.max")
+    if text is None or text.strip() == "max":
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _memory_limit_v1(directory: Path) -> float | None:
+    text = _read(directory / "memory.limit_in_bytes")
+    if text is None:
+        return None
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    return None if value >= 2**60 else value  # v1's "unlimited" is a huge number
+
+
+def cgroup_memory() -> int | None:
+    """The tightest cgroup memory limit over this process's group and its ancestors."""
+    layout = cgroup_layout()
+    if layout is None:
+        return None
+    version, own, mount = layout
+    limit = _tightest(own, mount, _memory_max if version == "v2" else _memory_limit_v1)
+    return None if limit is None else int(limit)
+
+
+def host_memory() -> int | None:
+    """Bytes this process may use: physical memory, capped by a cgroup limit."""
+    candidates = [c for c in (_physical_memory(), cgroup_memory()) if c]
+    return min(candidates) if candidates else None
 
 
 def proc_descendants() -> list[int]:

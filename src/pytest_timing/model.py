@@ -20,6 +20,7 @@ Semantics that every renderer must agree on live here, once:
   test back for CPU slots. ``RunInfo.cpu`` describes the hosts and the budget.
 * ``TestSpan.memory`` is the resident memory of the worker's process tree around the
   attempt (:class:`MemoryRecord`): before it, at its peak, and after it, in bytes.
+  ``RunInfo.memory`` describes the memory budget and its admission, when one was set.
 """
 
 from __future__ import annotations
@@ -401,6 +402,7 @@ class RunInfo:
     dist: str | None = None
     numprocesses: int | None = None
     cpu: dict[str, Any] | None = None  # hosts, budget and admission summary
+    memory: dict[str, Any] | None = None  # the memory budget and its admission summary
 
     @property
     def wall(self) -> float:
@@ -431,6 +433,7 @@ class RunInfo:
             "dist": self.dist,
             "numprocesses": self.numprocesses,
             "cpu": self.cpu,
+            "memory": self.memory,
         }
 
     @classmethod
@@ -457,6 +460,7 @@ class RunInfo:
             dist=None if data.get("dist") is None else str(data["dist"]),
             numprocesses=None if numprocesses is None else int(numprocesses),
             cpu=dict(data["cpu"]) if isinstance(data.get("cpu"), dict) else None,
+            memory=dict(data["memory"]) if isinstance(data.get("memory"), dict) else None,
         )
 
 

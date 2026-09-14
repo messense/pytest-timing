@@ -69,6 +69,7 @@ waited for. Each record identifies its measurement coverage.
 | `--timing-html-file PATH`, `--timing-json-file PATH`, `--timing-trace-file PATH` | Same, to an explicit path. |
 | `--timing-schedule PATH` | Under xdist, plan the workers' queues from the JSON run at `PATH`. |
 | `--timing-cpus N\|auto` | Under xdist, admit tests against a budget of `N` CPU slots per host (`auto` detects it). |
+| `--timing-memory SIZE\|auto` | Under xdist, keep tests whose recorded memory would not fit in `SIZE` together from running at once (`auto` takes 80% of the host's memory). |
 | `--timing-top=N` | Rows in the slowest-tests section (default 10, `0` hides it). |
 | `--timing-min=SECONDS` | Hide tests shorter than this from the slowest-tests section. |
 | `--timing-ascii-style=unicode\|ascii` | Chart glyphs. |
@@ -82,7 +83,8 @@ and schedule paths are resolved from pytest's root directory.
 
 The ini key `timing` is a boolean; `timing_html`, `timing_json` and `timing_trace`
 accept paths or `true` for the default filenames. Other ini keys are
-`timing_schedule`, `timing_cpus`, `timing_top`, `timing_min` and `timing_ascii_style`.
+`timing_schedule`, `timing_cpus`, `timing_memory`, `timing_top`, `timing_min` and
+`timing_ascii_style`.
 Environment variables use the uppercase key prefixed by `PYTEST_`, for example
 `PYTEST_TIMING=1`, `PYTEST_TIMING_HTML=path` or `PYTEST_TIMING_CPUS=auto`.
 `--timing-width` is command-line only.
@@ -99,7 +101,9 @@ statically declared demand and time waiting for CPU slots) and the resident memo
 of the worker's process tree around each test, in bytes: `base` before its set-up,
 `peak` during it, and `after` at its teardown. The difference between `peak` and
 `base` is what the test needed on top of the worker's existing footprint; `after`
-minus `base` is what stayed, such as a shared fixture it set up. It also records worker
+minus `base` is what stayed, such as a shared fixture it set up. With
+`--timing-memory`, the run's `memory` describes the budget and how admission went.
+It also records worker
 lifecycles, detected host CPU environments, and how the session ended (`finished`,
 `collect_only`, `interrupted`, `aborted`, `internal_error`, with pytest's reason). It is
 the input to the CLI below and to `--timing-schedule`.
@@ -258,6 +262,42 @@ default, share a local budget; workers on other hosts (`--tx ssh=...`) form sepa
 domains with their own budgets. With `-x` or `--maxfail`, xdist shuts every worker
 down; a test a worker was holding without having been admitted is withdrawn and
 never starts.
+
+## Keep memory-hungry tests apart
+
+Two tests that each need several gigabytes are fine on their own and fatal together:
+the kernel kills a worker, or the whole job. Nothing needs declaring for this. Every
+run records how much resident memory each test needed on top of its worker's footprint
+(`memory` in the JSON), and the next run keeps tests apart when their recorded needs
+would not fit in the budget at the same time:
+
+```
+pytest -n 4 --timing-json --timing-schedule pytest-timing.json --timing-memory 12G
+```
+
+`--timing-memory` takes a size with a binary suffix (`512M`, `12G`) or `auto`, which
+takes 80% of physical memory, capped by the cgroup memory limit. It reads the memory
+each test needed from the run at `--timing-schedule`, so the first run only records;
+the summary says how many tests had recorded memory. A test with no record weighs
+nothing until it has run once. A shared fixture keeps what its first test left resident
+(a loaded model, say) reserved for as long as it is alive, on that worker.
+
+What to expect:
+
+- The gate is the same fair waiting line as for CPU: a worker whose next test does
+  not fit waits with its fixtures alive, and the oldest request goes first. Memory
+  and CPU budgets are checked together; a test starts only when both fit.
+- Estimates are the largest rise any recorded attempt showed. They are relative to
+  the worker's footprint, so `auto` leaves a fifth of the host for the workers
+  themselves, the controller and everything else; set a smaller budget on a shared
+  machine.
+- A test recorded above the budget runs alone, and the summary counts it. Allocator
+  behaviour can make an estimate low: a test that reuses heap an earlier test freed
+  shows a smaller rise than it needs. Large buffers and subprocesses, the usual
+  cause of an out-of-memory kill, measure well.
+- Memory does not enter the planner: lanes are still balanced by duration and fixture
+  cost, and the gate only delays starts. Under `--dist load` and `worksteal`, like
+  CPU admission.
 
 ## Re-render or merge saved runs
 

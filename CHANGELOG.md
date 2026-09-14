@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
+
+- Estimate a test's cost from the median of its best attempts instead of its
+  longest one. The longest attempt grows with the number of attempts, so a history
+  merged from several runs drifted upward and a flaky test's worst run was taken as
+  its cost. Attempts are ranked clean before contended and passing before failing,
+  and fixture set-up costs use the median too.
 
 - Memory-aware admission under pytest-xdist. `--timing-memory SIZE|auto` (ini
   `timing_memory`, env `PYTEST_TIMING_MEMORY`) sets a memory budget per host, and the

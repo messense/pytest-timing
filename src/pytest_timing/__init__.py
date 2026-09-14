@@ -4,6 +4,6 @@ from __future__ import annotations
 
 from pytest_timing.demand import cpu
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = ["__version__", "cpu"]

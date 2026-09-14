@@ -61,7 +61,7 @@ def test_memory_sampler_sees_what_a_process_allocates() -> None:
 
 
 def test_memory_sampler_counts_a_live_child_where_it_can() -> None:
-    sampler = MemorySampler(tree_interval=0.02)
+    sampler = MemorySampler(tree_interval=0.02, idle_interval=0.02)
     if sampler.coverage != "tree":
         pytest.skip("no way to see descendants here")
     assert sampler.begin()  # before the child exists: its whole footprint is a rise
@@ -106,20 +106,43 @@ class FakeMemory(ResidentMemory):
 
 
 def test_memory_sampler_folds_descendants_in_and_keeps_the_peak() -> None:
-    memory = FakeMemory(own=[100, 150, 300, 110], children=[10, 5])
+    memory = FakeMemory(own=[100, 150, 300, 110], children=[10])
     sampler = MemorySampler(memory, interval=0.001, tree_interval=60.0)
     try:
-        assert sampler.begin()  # own 100 + children 10 (a fresh tree read)
+        assert sampler.begin()  # own 100 + children 10
         assert (sampler._base, sampler._peak) == (110, 110)
         deadline = time.monotonic() + 5.0
         while sampler._peak < 310 and time.monotonic() < deadline:
             time.sleep(0.005)
-        window = sampler.end()  # own 110 + children 5 (fresh again)
+        window = sampler.end()  # own 110 + the same children
     finally:
         sampler.close()
     assert window is not None
-    assert (window.base, window.peak, window.after) == (110, 310, 115)
-    assert memory.tree_reads == 2  # begin and end only: the interval never elapsed
+    assert (window.base, window.peak, window.after) == (110, 310, 120)
+    assert memory.tree_reads == 1  # listed once; the interval never elapsed again
+    assert sampler._thread is None  # close() returned promptly and joined it
+
+
+def test_memory_sampler_lists_descendants_less_often_while_there_are_none() -> None:
+    memory = FakeMemory(own=[100], children=[0, 0, 0, 0, 5, 5, 0])
+    sampler = MemorySampler(memory, interval=60.0, tree_interval=0.1, idle_interval=0.4)
+    assert sampler.begin()  # nothing found: 0.1 s becomes 0.2 s
+    assert (memory.tree_reads, sampler._children_every) == (1, 0.2)
+    sampler._children_at = -1.0  # pretend the interval elapsed
+    assert sampler._reading() == 100
+    assert (memory.tree_reads, sampler._children_every) == (2, 0.4)
+    sampler._children_at = -1.0
+    sampler._reading()
+    assert sampler._children_every == 0.4  # capped at the idle interval
+    sampler._children_at = -1.0
+    sampler._reading()
+    assert (memory.tree_reads, sampler._children_every) == (4, 0.4)
+    sampler._children_at = -1.0
+    assert sampler._reading() == 105  # found some: back to the fast interval
+    assert sampler._children_every == 0.1
+    assert sampler._reading() == 105  # still cached inside the interval
+    assert memory.tree_reads == 5
+    sampler.close()
 
 
 def test_memory_sampler_without_a_reading_records_nothing() -> None:

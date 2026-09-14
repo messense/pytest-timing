@@ -52,11 +52,12 @@ pip install "pytest-timing[xdist]"   # with pytest-xdist
 ```
 
 Python 3.10+ and pytest 7.3+. Distributed runs need pytest-xdist 3.7+.
-CPU and memory records include live subprocesses on Linux through `/proc`, or through
-[psutil](https://pypi.org/project/psutil/) when installed. Without either, POSIX CPU
-records include children the worker has waited for and Windows records cover only the
-worker itself; memory records on macOS and Windows cover only the worker. Each record
-identifies its measurement coverage.
+CPU records include live subprocesses on Linux through `/proc`, or through
+[psutil](https://pypi.org/project/psutil/) when installed. Without either, POSIX
+records include children the worker has waited for; Windows records cover only the
+worker itself. Memory records include live subprocesses on Linux and macOS, and on
+Windows with psutil; otherwise they cover only the worker. Each record identifies its
+measurement coverage.
 
 ## Options
 

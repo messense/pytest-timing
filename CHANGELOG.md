@@ -3,8 +3,8 @@
 ## Unreleased
 
 - Record each test's resident memory. A sampler thread in the process running the
-  tests polls the resident set size of the worker (and, on Linux or with psutil, its
-  live subprocesses) while a test runs. Test JSON records now include `memory` when
+  tests polls the resident set size of the worker (and, on Linux, macOS or with
+  psutil, its live subprocesses) while a test runs. Test JSON records now include `memory` when
   the platform provides a reading: `base` before the test's set-up, `peak` during
   it and `after` at its teardown, in bytes, with the measurement coverage. Nothing
   schedules on it yet.

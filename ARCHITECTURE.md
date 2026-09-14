@@ -396,22 +396,33 @@ attempt of the same test when one exists, keeping the contended ones in the file
 
 Memory is recorded so that a later run can keep tests that need a lot of it from
 running at the same time; nothing schedules on it yet. `ResidentMemory` reads the
-resident set size of the process running the tests (`/proc/self/statm` on Linux,
-`proc_pidinfo` through `libproc` on macOS, `GetProcessMemoryInfo` on Windows, or
-psutil anywhere it is installed) and, on Linux or with psutil, adds the resident
-sizes of its live descendants, found the same way as for CPU time. Descendants are
-summed, so pages they share count more than once; the total errs on the large side.
+resident set size of the process running the tests and, where they can be listed, of
+its live descendants: `/proc/self/statm` and the `/proc` walk shared with CPU
+measurement on Linux, `proc_pidinfo` and `proc_listchildpids` through `libproc` on
+macOS, `GetProcessMemoryInfo` on Windows for the worker alone. psutil fills in what
+the platform readers cannot do, today descendants on Windows; its `children` scans
+the whole process table, about ten milliseconds on macOS, so it is never preferred
+over a native reader. Descendants are summed, so pages they share count more than
+once; the total errs on the large side.
 
 A high-water mark such as `ru_maxrss` never comes down, so it cannot say what one
 test needed: only the test that first raised the worker's peak would show anything.
-`MemorySampler` therefore polls from a daemon thread while a window is open, every 20
-ms for the worker itself and every 100 ms for its descendants (listing them costs
-more), and keeps the highest total. The meter opens the window at `pytest_runtest_setup`
-and closes it when the teardown report is made, so shared fixture set-ups are charged
-to the test that paid for them, as their time is. The window goes on the teardown
-report as `timing_memory` and into the JSON as `memory`: `base`, `peak` and `after`
-in bytes, and the coverage (`tree` or `self`). A platform with no reading records
-nothing. The sampler sleeps between windows and is closed at `pytest_unconfigure`.
+`MemorySampler` therefore polls from a daemon thread while a window is open and
+keeps the highest total. The worker's own size is read every 20 ms; it costs about a
+microsecond on macOS and ten on Linux. Descendants are listed at most every 100 ms,
+and while none are found the interval doubles up to a second, since listing costs an
+order of magnitude more (and far more with psutil). Opening or closing a window never
+lists descendants by itself, so a fast test costs two readings of its own process, a
+few microseconds. The meter opens the window at `pytest_runtest_setup` and closes it
+when the teardown report is made, so shared fixture set-ups are charged to the test
+that paid for them, as their time is. The window goes on the teardown report as
+`timing_memory` and into the JSON as `memory`: `base`, `peak` and `after` in bytes,
+and the coverage (`tree` or `self`). A platform with no reading records nothing.
+The sampler sleeps between windows and is closed at `pytest_unconfigure`.
+
+A test shorter than the sampling interval is seen only at its edges: its record is
+what was resident before and after it, and a buffer allocated and freed inside it
+is missed. Faulting in enough memory to matter takes longer than one interval.
 
 `peak - base` is the attempt's rise: what it needed on top of the worker's footprint.
 `after - base` is what stayed resident, which for the first test of a session fixture

@@ -1,9 +1,11 @@
-"""Platform telemetry: the host's CPU budget, CPU time of a process tree, pressure.
+"""Platform telemetry: the host's CPU budget, CPU time and resident memory of a
+process tree, pressure.
 
-Everything that reads ``/proc``, ``/sys/fs/cgroup`` or the process table lives here,
-behind small objects the rest of the plugin can replace in tests. Every reading
-degrades explicitly: a value is ``None`` when the platform cannot provide it, and
-a CPU measurement says how much of the process tree it covered.
+Everything that reads ``/proc``, ``/sys/fs/cgroup``, the process table or the
+platform's process-information API lives here, behind small objects the rest of the
+plugin can replace in tests. Every reading degrades explicitly: a value is ``None``
+when the platform cannot provide it, and a CPU or memory measurement says how much
+of the process tree it covered.
 
 Budget
     :func:`host_cpu` combines the CPUs the process may run on (its affinity mask,
@@ -18,6 +20,14 @@ CPU time of a test
     a snapshot: exits during traversal and descendants that outlive or detach from
     their parents can leave gaps in the measurement.
 
+Resident memory of a test
+    :class:`ResidentMemory` reads the resident set size of the current process
+    (``/proc/self/statm`` on Linux, ``libproc`` on macOS, ``psapi`` on Windows, or
+    psutil anywhere) and, where descendants can be listed, adds theirs.
+    :class:`MemorySampler` polls it from a thread while a test runs and keeps the
+    peak, since a high-water mark like ``ru_maxrss`` never comes back down and would
+    attribute a whole worker's history to whichever test happened to raise it.
+
 Pressure
     Linux pressure stall information (``/proc/pressure/cpu`` or the cgroup's
     ``cpu.pressure``) says what share of the recent past some runnable task spent
@@ -28,8 +38,10 @@ Pressure
 
 from __future__ import annotations
 
+import math
 import os
 import sys
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -191,6 +203,34 @@ def host_cpu(pressure: Pressure | None = None) -> HostCpu:
     return HostCpu(cpus, affinity, quota, cgroup, pressure_readable, sys.platform)
 
 
+def proc_descendants() -> list[int]:
+    """Live descendants of this process, through ``/proc/<pid>/task/*/children``.
+
+    A snapshot: a process that exits during the walk is skipped, and one that
+    detached from its parent is not found.
+    """
+    found: list[int] = []
+    todo = [os.getpid()]
+    seen: set[int] = set()
+    while todo:
+        pid = todo.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        task_dir = PROC / str(pid) / "task"
+        try:
+            tids = os.listdir(task_dir)
+        except OSError:
+            continue
+        for tid in tids:
+            text = _read(task_dir / tid / "children")
+            if text:
+                todo.extend(int(c) for c in text.split() if c.isdigit())
+        if pid != os.getpid():
+            found.append(pid)
+    return found
+
+
 class ProcessTreeClock:
     """CPU seconds used by this process, its reaped children and its live descendants.
 
@@ -248,26 +288,7 @@ class ProcessTreeClock:
         return total
 
     def _live_proc(self) -> float:
-        total = 0.0
-        todo = [os.getpid()]
-        seen: set[int] = set()
-        while todo:
-            pid = todo.pop()
-            if pid in seen:
-                continue
-            seen.add(pid)
-            task_dir = PROC / str(pid) / "task"
-            try:
-                tids = os.listdir(task_dir)
-            except OSError:
-                continue
-            for tid in tids:
-                text = _read(task_dir / tid / "children")
-                if text:
-                    todo.extend(int(c) for c in text.split() if c.isdigit())
-            if pid != os.getpid():
-                total += self._proc_cpu(pid)
-        return total
+        return sum(self._proc_cpu(pid) for pid in proc_descendants())
 
     def _proc_cpu(self, pid: int) -> float:
         text = _read(PROC / str(pid) / "stat")
@@ -344,3 +365,269 @@ class Pressure:
                     return None
                 return number if name == "throttled_usec" else number // 1000
         return None
+
+
+SAMPLE_INTERVAL = 0.02
+"""Seconds between resident-memory readings of the worker while a test runs."""
+TREE_INTERVAL = 0.1
+"""Seconds between readings of the worker's descendants: listing them costs more."""
+
+
+def _linux_own_rss() -> int | None:
+    text = _read(PROC / "self" / "statm")
+    if not text:
+        return None
+    try:
+        return int(text.split()[1]) * _PAGE_SIZE
+    except (IndexError, ValueError):
+        return None
+
+
+def _linux_tree_rss() -> int:
+    total = 0
+    for pid in proc_descendants():
+        text = _read(PROC / str(pid) / "statm")
+        if text:
+            try:
+                total += int(text.split()[1]) * _PAGE_SIZE
+            except (IndexError, ValueError):
+                pass
+    return total
+
+
+def _page_size() -> int:
+    try:
+        return int(os.sysconf("SC_PAGE_SIZE"))
+    except (ValueError, OSError, AttributeError):
+        return 4096
+
+
+_PAGE_SIZE = _page_size()
+
+
+def _darwin_own_rss_reader() -> Callable[[], int | None] | None:
+    """``proc_pidinfo(PROC_PIDTASKINFO)``: ``pti_resident_size`` is the second field."""
+    import ctypes
+    import ctypes.util
+
+    try:
+        name = ctypes.util.find_library("proc")
+        lib = ctypes.CDLL(name or "libproc.dylib")
+        pidinfo = lib.proc_pidinfo
+    except (OSError, AttributeError):
+        return None
+    pidinfo.restype = ctypes.c_int
+    pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+    buffer = ctypes.create_string_buffer(512)
+    pid = os.getpid()
+
+    def own() -> int | None:
+        size = pidinfo(pid, 4, 0, buffer, len(buffer))  # PROC_PIDTASKINFO
+        if size < 16:
+            return None
+        return int.from_bytes(buffer.raw[8:16], sys.byteorder)
+
+    return own if own() else None
+
+
+def _windows_own_rss_reader() -> Callable[[], int | None] | None:
+    """``GetProcessMemoryInfo``: the working set, the process's resident pages."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Counters(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    try:
+        windll = ctypes.windll  # type: ignore[attr-defined,unused-ignore]
+        psapi, kernel32 = windll.psapi, windll.kernel32
+        info = psapi.GetProcessMemoryInfo
+        handle = kernel32.GetCurrentProcess()
+    except (OSError, AttributeError):
+        return None
+    counters = Counters()
+    counters.cb = ctypes.sizeof(Counters)
+
+    def own() -> int | None:
+        if not info(handle, ctypes.byref(counters), ctypes.sizeof(Counters)):
+            return None
+        return int(counters.WorkingSetSize)
+
+    return own if own() else None
+
+
+class ResidentMemory:
+    """Resident set size of this process and, where they can be listed, its descendants.
+
+    ``coverage`` names what a reading includes: ``tree`` when live descendants are
+    counted, ``self`` when only this process is, ``none`` when the platform gives no
+    reading at all (then :meth:`own` is ``None``). Descendants are summed, so pages
+    they share with each other count more than once: a conservative total.
+    """
+
+    def __init__(self) -> None:
+        self.coverage = "none"
+        self._own: Callable[[], int | None] = lambda: None
+        self._tree: Callable[[], int] | None = None
+        if sys.platform.startswith("linux") and _linux_own_rss():
+            self._own, self._tree = _linux_own_rss, _linux_tree_rss
+            self.coverage = "tree"
+            return
+        try:
+            import psutil  # type: ignore[import-not-found,import-untyped,unused-ignore]
+        except ImportError:
+            psutil = None
+        if psutil is not None:
+            process = psutil.Process()
+
+            def own() -> int | None:
+                try:
+                    return int(process.memory_info().rss)
+                except psutil.Error:
+                    return None
+
+            def tree() -> int:
+                total = 0
+                try:
+                    children = process.children(recursive=True)
+                except psutil.Error:
+                    return 0
+                for child in children:
+                    try:
+                        total += int(child.memory_info().rss)
+                    except psutil.Error:
+                        continue
+                return total
+
+            if own():
+                self._own, self._tree = own, tree
+                self.coverage = "tree"
+                return
+        reader = None
+        try:
+            if sys.platform == "darwin":
+                reader = _darwin_own_rss_reader()
+            elif sys.platform == "win32":
+                reader = _windows_own_rss_reader()
+        except Exception:  # ctypes lookups fail in platform-specific ways
+            reader = None
+        if reader is not None:
+            self._own = reader
+            self.coverage = "self"
+
+    def own(self) -> int | None:
+        """Resident bytes of this process, or ``None`` when unreadable."""
+        return self._own()
+
+    def descendants(self) -> int:
+        """Resident bytes of live descendants; zero when they cannot be listed."""
+        return self._tree() if self._tree is not None else 0
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryWindow:
+    """What one sampling window saw, in bytes."""
+
+    base: int  # resident when the window opened
+    peak: int  # the highest reading inside it
+    after: int  # resident when it closed
+    coverage: str
+
+
+class MemorySampler:
+    """Polls resident memory from a thread while a window is open and keeps the peak.
+
+    The thread reads the process every ``interval`` seconds and its descendants
+    every ``tree_interval``, adding the latest descendant total to each reading.
+    Between windows it sleeps. ``begin`` and ``end`` are called from the thread
+    running the tests; ``close`` stops the sampler for good.
+    """
+
+    def __init__(
+        self,
+        memory: ResidentMemory | None = None,
+        interval: float = SAMPLE_INTERVAL,
+        tree_interval: float = TREE_INTERVAL,
+    ) -> None:
+        self.memory = memory or ResidentMemory()
+        self.interval = interval
+        self.tree_interval = tree_interval
+        self._lock = threading.Lock()
+        self._open = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._base = self._peak = 0
+        self._children = 0
+        self._children_at = -math.inf
+
+    @property
+    def coverage(self) -> str:
+        return self.memory.coverage
+
+    def _reading(self, fresh: bool) -> int | None:
+        own = self.memory.own()
+        if own is None:
+            return None
+        now = time.monotonic()
+        if fresh or now - self._children_at >= self.tree_interval:
+            self._children = self.memory.descendants()
+            self._children_at = now
+        return own + self._children
+
+    def begin(self) -> bool:
+        """Open a window; ``False`` when the platform gives no reading."""
+        with self._lock:
+            reading = self._reading(fresh=True)
+            if reading is None:
+                return False
+            self._base = self._peak = reading
+        if self._thread is None and not self._stop.is_set():
+            self._thread = threading.Thread(
+                target=self._run, name="pytest-timing-memory", daemon=True
+            )
+            self._thread.start()
+        self._open.set()
+        return True
+
+    def end(self) -> MemoryWindow | None:
+        """Close the window and report it; ``None`` when none was open."""
+        if not self._open.is_set():
+            return None
+        self._open.clear()
+        with self._lock:
+            after = self._reading(fresh=True)
+            if after is None:
+                after = self._peak
+            peak = max(self._peak, after)
+            return MemoryWindow(self._base, peak, after, self.memory.coverage)
+
+    def _sample(self) -> None:
+        with self._lock:
+            reading = self._reading(fresh=False)
+            if reading is not None and reading > self._peak:
+                self._peak = reading
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            if not self._open.wait(0.5):
+                continue
+            self._sample()
+            self._stop.wait(self.interval)
+
+    def close(self) -> None:
+        self._stop.set()
+        self._open.clear()
+        if self._thread is not None:
+            self._thread.join(1.0)
+            self._thread = None

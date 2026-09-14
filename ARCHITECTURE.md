@@ -14,9 +14,9 @@ schedules a run from the previous one. For usage, see the [README](README.md).
 | `cli.py` | `pytest-timing render` and `pytest-timing merge`. |
 | `fixtures.py` | Times shared fixture set-up where tests run and lists dependencies on reports. |
 | `schedule.py` | Duration estimates, the fixture-aware cost model and the planner. Free of xdist. |
-| `demand.py` | Declared CPU demand: the `timing_cpu` marker, the fixture decorator, the declarations a worker sends, and the meter that records each test's CPU work. |
+| `demand.py` | Declared CPU demand: the `timing_cpu` marker, the fixture decorator, the declarations a worker sends, and the meter that records each test's CPU work and resident memory. |
 | `admission.py` | One host's CPU budget, reservations, fair waiting line and pressure feedback. Free of xdist and platform reads. |
-| `telemetry.py` | Platform reads: affinity and cgroup quota, CPU time of a process tree, pressure and throttling. |
+| `telemetry.py` | Platform reads: affinity and cgroup quota, CPU time and resident memory of a process tree, pressure and throttling. |
 | `xdist_scheduler.py` | The xdist scheduler that drives workers with the planner and the admission gate, in `load` and `worksteal` mode. |
 | `xdist_compat.py` | Everything that reads pytest-xdist internals (versions, worker detection, why the controller stopped, the custom worker event and controller command). |
 
@@ -391,6 +391,35 @@ tests without a teardown report may have no CPU record. Each record also carries
 the host's PSI `some` share and whether the cgroup was throttled during
 the test; `Estimates.from_run` treats such attempts as contended and prefers a clean
 attempt of the same test when one exists, keeping the contended ones in the file.
+
+## Measuring memory
+
+Memory is recorded so that a later run can keep tests that need a lot of it from
+running at the same time; nothing schedules on it yet. `ResidentMemory` reads the
+resident set size of the process running the tests (`/proc/self/statm` on Linux,
+`proc_pidinfo` through `libproc` on macOS, `GetProcessMemoryInfo` on Windows, or
+psutil anywhere it is installed) and, on Linux or with psutil, adds the resident
+sizes of its live descendants, found the same way as for CPU time. Descendants are
+summed, so pages they share count more than once; the total errs on the large side.
+
+A high-water mark such as `ru_maxrss` never comes down, so it cannot say what one
+test needed: only the test that first raised the worker's peak would show anything.
+`MemorySampler` therefore polls from a daemon thread while a window is open, every 20
+ms for the worker itself and every 100 ms for its descendants (listing them costs
+more), and keeps the highest total. The meter opens the window at `pytest_runtest_setup`
+and closes it when the teardown report is made, so shared fixture set-ups are charged
+to the test that paid for them, as their time is. The window goes on the teardown
+report as `timing_memory` and into the JSON as `memory`: `base`, `peak` and `after`
+in bytes, and the coverage (`tree` or `self`). A platform with no reading records
+nothing. The sampler sleeps between windows and is closed at `pytest_unconfigure`.
+
+`peak - base` is the attempt's rise: what it needed on top of the worker's footprint.
+`after - base` is what stayed resident, which for the first test of a session fixture
+is roughly the fixture. Both are biased by allocator behaviour: a heap that already
+grew for an earlier test can serve a later one without raising RSS, so a rise can
+undercount a test whose allocations reuse freed heap, and a freed buffer the allocator
+keeps can leave `after` high. Large buffers and subprocess memory, the usual causes of
+an out-of-memory kill, are mapped and unmapped directly and measure well.
 
 ## Feedback
 

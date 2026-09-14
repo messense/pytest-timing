@@ -25,14 +25,14 @@ import pytest
 
 from pytest_timing import xdist_compat
 from pytest_timing.collector import Collector, PhaseReport
-from pytest_timing.demand import EVENT, EXECUTION_ATTR, MARKER, CpuMeter, Declarations
+from pytest_timing.demand import EVENT, EXECUTION_ATTR, MARKER, MEMORY_ATTR, CpuMeter, Declarations
 from pytest_timing.demand import REPORT_ATTR as CPU_ATTR
 from pytest_timing.fixtures import REPORT_ATTR, FixtureTimer
 from pytest_timing.model import Run, RunInfo
 from pytest_timing.outputs import OUTPUTS, write_output
 from pytest_timing.render.ascii import render_ascii
 from pytest_timing.schedule import Estimates
-from pytest_timing.telemetry import Pressure, ProcessTreeClock, host_cpu
+from pytest_timing.telemetry import MemorySampler, Pressure, ProcessTreeClock, host_cpu
 
 MAIN_LANE = "main"
 EQUAL_ESTIMATE = 0.001  # seconds per test when a run has no recorded durations
@@ -222,8 +222,8 @@ def pytest_configure(config: pytest.Config) -> None:
     settings = Settings(config)
     if not settings.enabled:
         return
-    # Shared fixture set-up is timed, and CPU work measured, wherever tests run: in
-    # every xdist worker, or here.
+    # Shared fixture set-up is timed, and CPU work and memory measured, wherever
+    # tests run: in every xdist worker, or here.
     clock = ProcessTreeClock()
     timer = FixtureTimer(work=clock.seconds)
     config.pluginmanager.register(timer, "pytest_timing_fixtures")
@@ -234,7 +234,9 @@ def pytest_configure(config: pytest.Config) -> None:
         def send(name: str, payload: dict[str, Any]) -> None:
             xdist_compat.send_event(config, name, payload)
 
-    config.pluginmanager.register(CpuMeter(timer, send, clock, Pressure()), "pytest_timing_cpu")
+    config.pluginmanager.register(
+        CpuMeter(timer, send, clock, Pressure(), MemorySampler()), "pytest_timing_cpu"
+    )
     if worker:
         return  # everything else happens on the controller
     config.pluginmanager.register(TimingPlugin(config, settings), "pytest_timing")
@@ -549,6 +551,7 @@ class TimingPlugin:
                 received=time.time() if not (start and stop) else 0.0,
                 fixtures=getattr(report, REPORT_ATTR, None),
                 cpu=cpu,
+                memory=getattr(report, MEMORY_ATTR, None),
                 execution=getattr(report, EXECUTION_ATTR, None),
             )
         )

@@ -18,6 +18,8 @@ Semantics that every renderer must agree on live here, once:
   time, measured CPU work of the worker and its descendants, declared demand, how much
   of the process tree the measurement covered, and how long the controller held the
   test back for CPU slots. ``RunInfo.cpu`` describes the hosts and the budget.
+* ``TestSpan.memory`` is the resident memory of the worker's process tree around the
+  attempt (:class:`MemoryRecord`): before it, at its peak, and after it, in bytes.
 """
 
 from __future__ import annotations
@@ -202,6 +204,49 @@ CONTENDED_PRESSURE = 0.25
 
 
 @dataclass(slots=True)
+class MemoryRecord:
+    """Resident memory around one attempt, in bytes; see :mod:`pytest_timing.telemetry`.
+
+    ``base`` is what the worker's process tree had resident when set-up began,
+    ``peak`` the highest reading until the teardown report, ``after`` the reading at
+    that report. ``coverage`` says whether descendants were counted (``tree``) or
+    only the worker (``self``). A worker's heap rarely shrinks, so ``rise`` is
+    what the attempt needed on top of what was already there, and ``retained`` what
+    stayed resident afterwards: a shared fixture it set up, or a leak.
+    """
+
+    base: int = 0
+    peak: int = 0
+    after: int = 0
+    coverage: str = "none"
+
+    @property
+    def rise(self) -> int:
+        return max(0, self.peak - self.base)
+
+    @property
+    def retained(self) -> int:
+        return max(0, self.after - self.base)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "base": self.base,
+            "peak": self.peak,
+            "after": self.after,
+            "coverage": self.coverage,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> MemoryRecord:
+        return cls(
+            base=int(data.get("base", 0)),
+            peak=int(data.get("peak", 0)),
+            after=int(data.get("after", 0)),
+            coverage=str(data.get("coverage", "none")),
+        )
+
+
+@dataclass(slots=True)
 class TestSpan:
     """One attempt at running one test occurrence on one worker.
 
@@ -221,6 +266,7 @@ class TestSpan:
     occurrence: int = 0
     fixtures: dict[str, float | None] = field(default_factory=dict)
     cpu: CpuRecord | None = None
+    memory: MemoryRecord | None = None
 
     @property
     def duration(self) -> float:
@@ -258,12 +304,15 @@ class TestSpan:
             doc["fixtures"] = {key: _opt_round(seconds) for key, seconds in self.fixtures.items()}
         if self.cpu is not None:
             doc["cpu"] = self.cpu.to_dict()
+        if self.memory is not None:
+            doc["memory"] = self.memory.to_dict()
         return doc
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TestSpan:
         fixtures = data.get("fixtures") or {}
         cpu = data.get("cpu")
+        memory = data.get("memory")
         return cls(
             nodeid=str(data["nodeid"]),
             worker=str(data["worker"]),
@@ -281,6 +330,7 @@ class TestSpan:
                 for key, seconds in dict(fixtures).items()
             },
             cpu=CpuRecord.from_dict(dict(cpu)) if isinstance(cpu, dict) else None,
+            memory=MemoryRecord.from_dict(dict(memory)) if isinstance(memory, dict) else None,
         )
 
 

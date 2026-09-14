@@ -52,10 +52,11 @@ pip install "pytest-timing[xdist]"   # with pytest-xdist
 ```
 
 Python 3.10+ and pytest 7.3+. Distributed runs need pytest-xdist 3.7+.
-CPU records include live subprocesses on Linux through `/proc`, or through
-[psutil](https://pypi.org/project/psutil/) when installed. Without either, POSIX
-records include children the worker has waited for; Windows records cover only the
-worker itself. Each CPU record identifies its measurement coverage.
+CPU and memory records include live subprocesses on Linux through `/proc`, or through
+[psutil](https://pypi.org/project/psutil/) when installed. Without either, POSIX CPU
+records include children the worker has waited for and Windows records cover only the
+worker itself; memory records on macOS and Windows cover only the worker. Each record
+identifies its measurement coverage.
 
 ## Options
 
@@ -94,7 +95,11 @@ environment, which wins over ini. Timing is enabled if any source requests it:
 
 **JSON** is the plugin's own record of the run: tests with their worker, phases and
 shared fixtures, plus CPU telemetry when available (elapsed time, measured CPU time,
-statically declared demand and time waiting for CPU slots). It also records worker
+statically declared demand and time waiting for CPU slots) and the resident memory
+of the worker's process tree around each test, in bytes: `base` before its set-up,
+`peak` during it, and `after` at its teardown. The difference between `peak` and
+`base` is what the test needed on top of the worker's existing footprint; `after`
+minus `base` is what stayed, such as a shared fixture it set up. It also records worker
 lifecycles, detected host CPU environments, and how the session ended (`finished`,
 `collect_only`, `interrupted`, `aborted`, `internal_error`, with pytest's reason). It is
 the input to the CLI below and to `--timing-schedule`.

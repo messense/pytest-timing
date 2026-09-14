@@ -33,11 +33,11 @@ def _run_with(*tests: tuple[str, float, str]) -> Any:
     return c.finish(T0 + at, termination="finished")
 
 
-def test_estimate_is_longest_attempt_and_default_is_mean() -> None:
+def test_estimate_prefers_passing_attempts_and_default_is_mean() -> None:
     run = _run_with(
         ("t.py::slow", 2.0, "passed"),
-        ("t.py::flaky", 0.5, "failed"),
-        ("t.py::flaky", 1.0, "passed"),  # a retry: keep the longer attempt
+        ("t.py::flaky", 0.5, "rerun"),  # stopped early at the assertion
+        ("t.py::flaky", 1.0, "passed"),  # the retry: what the test costs when it works
         ("t.py::fast", 0.1, "passed"),
     )
     est = Estimates.from_run(run)
@@ -47,6 +47,30 @@ def test_estimate_is_longest_attempt_and_default_is_mean() -> None:
     assert est.default == pytest.approx(3.1 / 3, abs=1e-5)
     assert est.estimate("t.py::new") == pytest.approx(3.1 / 3, abs=1e-5)
     assert est.known(["t.py::slow", "t.py::flaky", "t.py::fast", "t.py::new"]) == 3
+
+
+def test_estimate_is_median_of_repeated_attempts() -> None:
+    # A history merged from several runs: one slow outlier must not become the estimate.
+    run = _run_with(
+        ("t.py::a", 1.0, "passed"),
+        ("t.py::a", 1.2, "passed"),
+        ("t.py::a", 4.0, "passed"),
+        ("t.py::b", 0.4, "passed"),
+        ("t.py::b", 0.8, "passed"),  # even count: the middle two are averaged
+        ("t.py::c", 0.3, "failed"),
+        ("t.py::c", 0.9, "failed"),  # only failures: their median
+    )
+    est = Estimates.from_run(run)
+    assert est.durations == pytest.approx({"t.py::a": 1.2, "t.py::b": 0.6, "t.py::c": 0.6})
+
+
+def test_setup_cost_is_median_of_recorded_setups() -> None:
+    c = Collector(make_info())
+    for i, seconds in enumerate((2.0, 0.5, 0.6)):
+        full_test(c, f"t.py::t{i}", i * 3.0, setup=seconds + 0.1, call=0.1, teardown=0.0)
+        c.tests[-1].fixtures = {DB: seconds}
+    run = c.finish(T0 + 9, termination="finished")
+    assert Estimates.from_run(run).setups == pytest.approx({DB: 0.6})
 
 
 def test_crashed_spans_carry_no_clock_and_are_unknown() -> None:

@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from functools import cache
 from pathlib import Path
-from statistics import fmean
+from statistics import fmean, median
 
 from pytest_timing.demand import Declarations, key_base
 from pytest_timing.model import Run
@@ -80,34 +80,41 @@ class Estimates:
 
     @classmethod
     def from_run(cls, run: Run, source: str = "") -> Estimates:
-        durations: dict[str, float] = {}
-        contended: dict[str, float] = {}  # attempts under visible CPU contention
+        """Estimate each test's own time as the median of its most trustworthy attempts.
+
+        Attempts are ranked clean before contended and passing before failing; only the
+        best rank present is used. The median is robust to the odd slow attempt, and it
+        does not grow with the number of attempts the way the longest one does, so a
+        history merged from many runs stays comparable to a single run.
+        """
+        attempts: dict[str, dict[int, list[float]]] = {}  # nodeid -> rank -> own seconds
         families: dict[str, set[str]] = {}
-        setups: dict[str, float] = {}
+        setups: dict[str, list[float]] = {}
         for test in run.tests:
             if test.fixtures:
                 families.setdefault(test.nodeid, set()).update(test.fixtures)
                 for key, seconds in test.fixtures.items():
                     if seconds:
-                        setups[key] = max(setups.get(key, 0.0), seconds)
+                        setups.setdefault(key, []).append(seconds)
             if test.outcome == "crashed":
                 continue  # the recorded stop is the worker's death, not the test's
             own = test.duration - test.shared_setup
+            contended = False
             if test.cpu is not None:
                 own -= test.cpu.runtime_wait
+                contended = test.cpu.contended
             if own <= 0:
                 continue
-            target = contended if test.cpu is not None and test.cpu.contended else durations
-            target[test.nodeid] = max(target.get(test.nodeid, 0.0), own)
-        for nodeid, own in contended.items():
-            durations.setdefault(nodeid, own)  # better than nothing, never than a clean one
+            rank = (2 if contended else 0) + (1 if test.is_bad else 0)
+            attempts.setdefault(test.nodeid, {}).setdefault(rank, []).append(own)
+        durations = {nodeid: median(ranks[min(ranks)]) for nodeid, ranks in attempts.items()}
         default = fmean(durations.values()) if durations else 0.0
         return cls(
             durations,
             default,
             source,
             {nodeid: frozenset(keys) for nodeid, keys in families.items()},
-            setups,
+            {key: median(seconds) for key, seconds in setups.items()},
         )
 
     @classmethod

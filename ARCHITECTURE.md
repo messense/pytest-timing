@@ -377,7 +377,12 @@ on v2, `throttled_time` in nanoseconds on v1).
 
 `ProcessTreeClock` uses `os.times()` for worker CPU time and, on POSIX, reaped child
 CPU time. Where available, it adds live descendants through
-`/proc/<pid>/task/*/children` and `/proc/<pid>/stat` on Linux, or psutil otherwise.
+`/proc/<pid>/task/*/children` and `/proc/<pid>/stat` on Linux, through `libproc` on
+macOS (`proc_listchildpids` to find them, `proc_pidinfo` for their task times, in
+Mach time units converted with `mach_timebase_info`), or psutil otherwise. psutil is
+the last resort because its `children` scans the whole process table, about ten
+milliseconds on macOS, and the clock is read several times per test: with psutil
+installed, 3,000 trivial tests went from under a second to over a minute.
 Readings account for a waited-for child moving from the live total into the reaped
 total. Process discovery is a snapshot, so exits during traversal or descendants
 that outlive or detach from their parents can leave gaps. Every record reports its
@@ -398,10 +403,9 @@ Memory is recorded so that a later run can keep tests that need a lot of it from
 running at the same time; nothing schedules on it yet. `ResidentMemory` reads the
 resident set size of the process running the tests and, where they can be listed, of
 its live descendants: `/proc/self/statm` and the `/proc` walk shared with CPU
-measurement on Linux, `proc_pidinfo` and `proc_listchildpids` through `libproc` on
-macOS, `GetProcessMemoryInfo` on Windows for the worker alone. psutil fills in what
-the platform readers cannot do, today descendants on Windows; its `children` scans
-the whole process table, about ten milliseconds on macOS, so it is never preferred
+measurement on Linux, the `libproc` reader shared with the CPU clock on macOS,
+`GetProcessMemoryInfo` on Windows for the worker alone. psutil fills in what the
+platform readers cannot do, today descendants on Windows, and is never preferred
 over a native reader. Descendants are summed, so pages they share count more than
 once; the total errs on the large side.
 

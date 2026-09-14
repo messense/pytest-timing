@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- On macOS, CPU time and memory of live subprocesses are read through `libproc`
+  instead of psutil. psutil's child listing scans the whole process table, and the
+  CPU clock is read several times per test: with psutil installed, `--timing` on
+  3,000 trivial tests took over a minute instead of under a second. psutil is now
+  used only where no native reader covers subprocesses, which is Windows.
 - Record each test's resident memory. A sampler thread in the process running the
   tests polls the resident set size of the worker (and, on Linux, macOS or with
   psutil, its live subprocesses) while a test runs. Test JSON records now include `memory` when

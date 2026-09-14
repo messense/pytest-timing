@@ -15,7 +15,8 @@ Budget
 CPU time of a test
     ``process_time()`` sees only the current process. :class:`ProcessTreeClock`
     adds the children the process has already reaped (``os.times``) and, where the
-    platform lists them, the CPU time its live descendants have accumulated so far.
+    platform lists them (``/proc`` on Linux, ``libproc`` on macOS, psutil elsewhere),
+    the CPU time its live descendants have accumulated so far.
     A waited-for child moves from the live total to the reaped total. Discovery is
     a snapshot: exits during traversal and descendants that outlive or detach from
     their parents can leave gaps in the measurement.
@@ -23,7 +24,8 @@ CPU time of a test
 Resident memory of a test
     :class:`ResidentMemory` reads the resident set size of the current process
     (``/proc/self/statm`` on Linux, ``libproc`` on macOS, ``psapi`` on Windows, or
-    psutil anywhere) and, where descendants can be listed, adds theirs.
+    psutil where nothing native covers descendants) and, where descendants can be
+    listed, adds theirs.
     :class:`MemorySampler` polls it from a thread while a test runs and keeps the
     peak, since a high-water mark like ``ru_maxrss`` never comes back down and would
     attribute a whole worker's history to whichever test happened to raise it.
@@ -231,25 +233,126 @@ def proc_descendants() -> list[int]:
     return found
 
 
+class DarwinLibproc:
+    """``libproc`` on macOS: children, resident size and CPU time of any process.
+
+    ``proc_listchildpids`` lists a process's children without scanning the process
+    table, which is what makes psutil's ``children`` cost about ten milliseconds.
+    ``proc_pidinfo(PROC_PIDTASKINFO)`` fills a ``proc_taskinfo``: virtual size,
+    resident size, then total user and system time in Mach time units, which
+    ``mach_timebase_info`` converts to nanoseconds (1/1 on Intel, 125/3 on Apple
+    silicon). One call serves both the memory sampler and the CPU clock.
+    """
+
+    PIDTASKINFO = 4
+
+    def __init__(self) -> None:
+        import ctypes
+        import ctypes.util
+
+        name = ctypes.util.find_library("proc")
+        lib = ctypes.CDLL(name or "libproc.dylib")
+        self._pidinfo = lib.proc_pidinfo
+        self._pidinfo.restype = ctypes.c_int
+        self._pidinfo.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint64,
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
+        self._listchildren = lib.proc_listchildpids
+        self._listchildren.restype = ctypes.c_int
+        self._listchildren.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+        self._info = ctypes.create_string_buffer(512)
+        self._pids = (ctypes.c_int * 4096)()
+        self._pids_size = ctypes.sizeof(self._pids)
+
+        class Timebase(ctypes.Structure):
+            _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
+
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libSystem.dylib")
+        timebase = Timebase()
+        libc.mach_timebase_info(ctypes.byref(timebase))
+        if not timebase.numer or not timebase.denom:
+            raise OSError("mach_timebase_info gave no ratio")
+        self._seconds_per_tick: float = float(timebase.numer) / float(timebase.denom) / 1e9
+
+    def _taskinfo(self, pid: int, size: int) -> bytes | None:
+        got = self._pidinfo(pid, self.PIDTASKINFO, 0, self._info, len(self._info))
+        return self._info.raw[:size] if got >= size else None
+
+    def rss(self, pid: int) -> int | None:
+        raw = self._taskinfo(pid, 16)
+        return None if raw is None else int.from_bytes(raw[8:16], sys.byteorder)
+
+    def cpu(self, pid: int) -> float:
+        raw = self._taskinfo(pid, 32)
+        if raw is None:
+            return 0.0
+        user = int.from_bytes(raw[16:24], sys.byteorder)
+        system = int.from_bytes(raw[24:32], sys.byteorder)
+        return (user + system) * self._seconds_per_tick
+
+    def children(self, pid: int) -> list[int]:
+        count = self._listchildren(pid, self._pids, self._pids_size)
+        return list(self._pids[:count]) if count > 0 else []
+
+    def descendants(self) -> list[int]:
+        """Live descendants of this process; a snapshot, like :func:`proc_descendants`."""
+        me = os.getpid()
+        found: list[int] = []
+        todo = [me]
+        seen: set[int] = set()
+        while todo:
+            pid = todo.pop()
+            if pid in seen:
+                continue
+            seen.add(pid)
+            todo.extend(self.children(pid))
+            if pid != me:
+                found.append(pid)
+        return found
+
+
+@lru_cache(maxsize=1)
+def darwin_libproc() -> DarwinLibproc | None:
+    """The ``libproc`` reader on macOS, or ``None`` elsewhere or when it cannot be loaded."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        lib = DarwinLibproc()
+    except Exception:  # ctypes lookups fail in platform-specific ways
+        return None
+    return lib if lib.rss(os.getpid()) else None
+
+
 class ProcessTreeClock:
     """CPU seconds used by this process, its reaped children and its live descendants.
 
     ``coverage`` names what a reading includes: ``tree`` when live descendants are
-    counted (Linux with ``/proc``, or anywhere with psutil installed), ``reaped``
-    when only children that have already been waited for are (``os.times``), and
-    ``self`` where the platform reports nothing about children at all.
+    counted (Linux with ``/proc``, macOS with ``libproc``, or anywhere with psutil
+    installed), ``reaped`` when only children that have already been waited for are
+    (``os.times``), and ``self`` where the platform reports nothing about children
+    at all. psutil is the last resort: its ``children`` scans the whole process table,
+    about ten milliseconds on macOS, and the clock is read several times per test.
     """
 
     def __init__(self) -> None:
         self._psutil: Any = None
         self._tick = 100.0
         self.coverage = "self" if sys.platform == "win32" else "reaped"
+        self._libproc: DarwinLibproc | None = darwin_libproc()
+        libproc = self._libproc
         if sys.platform.startswith("linux") and (PROC / "self" / "task").is_dir():
             try:
                 self._tick = float(os.sysconf("SC_CLK_TCK"))
             except (ValueError, OSError, AttributeError):
                 pass
             self._live = self._live_proc
+            self.coverage = "tree"
+        elif libproc is not None:
+            self._live = self._live_libproc
             self.coverage = "tree"
         else:
             try:
@@ -289,6 +392,12 @@ class ProcessTreeClock:
 
     def _live_proc(self) -> float:
         return sum(self._proc_cpu(pid) for pid in proc_descendants())
+
+    def _live_libproc(self) -> float:
+        lib = self._libproc
+        if lib is None:
+            return 0.0
+        return sum(lib.cpu(pid) for pid in lib.descendants())
 
     def _proc_cpu(self, pid: int) -> float:
         text = _read(PROC / str(pid) / "stat")
@@ -410,49 +519,16 @@ Readers = tuple[Callable[[], int | None], Callable[[], int] | None]
 
 
 def _darwin_readers() -> Readers | None:
-    """``libproc``: ``proc_pidinfo(PROC_PIDTASKINFO)`` has ``pti_resident_size`` as its
-    second field, ``proc_listchildpids`` lists a process's children."""
-    import ctypes
-    import ctypes.util
-
-    try:
-        name = ctypes.util.find_library("proc")
-        lib = ctypes.CDLL(name or "libproc.dylib")
-        pidinfo, listchildren = lib.proc_pidinfo, lib.proc_listchildpids
-    except (OSError, AttributeError):
+    lib = darwin_libproc()
+    if lib is None:
         return None
-    pidinfo.restype = ctypes.c_int
-    pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
-    listchildren.restype = ctypes.c_int
-    listchildren.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
-    info = ctypes.create_string_buffer(512)
-    pids = (ctypes.c_int * 4096)()
     me = os.getpid()
 
-    def rss(pid: int) -> int | None:
-        size = pidinfo(pid, 4, 0, info, len(info))  # PROC_PIDTASKINFO
-        if size < 16:
-            return None
-        return int.from_bytes(info.raw[8:16], sys.byteorder)
-
     def own() -> int | None:
-        return rss(me)
+        return lib.rss(me)
 
     def tree() -> int:
-        total = 0
-        todo = [me]
-        seen: set[int] = set()
-        while todo:
-            pid = todo.pop()
-            if pid in seen:
-                continue
-            seen.add(pid)
-            count = listchildren(pid, pids, ctypes.sizeof(pids))
-            if count > 0:
-                todo.extend(pids[:count])
-            if pid != me:
-                total += rss(pid) or 0
-        return total
+        return sum(lib.rss(pid) or 0 for pid in lib.descendants())
 
     return (own, tree) if own() else None
 

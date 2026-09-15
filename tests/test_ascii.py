@@ -56,6 +56,19 @@ def test_min_duration_filters_slowest(sample_run: Run) -> None:
     assert "test_two" in out and "test_four" not in out
 
 
+def test_slowest_rows_say_how_long_admission_held_a_test(sample_run: Run) -> None:
+    from pytest_timing.model import CpuRecord, MemoryRecord
+
+    two = next(t for t in sample_run.tests if t.nodeid.endswith("test_two"))
+    two.memory = MemoryRecord(base=1, peak=2, after=1, coverage="self", wait=0.3)
+    two.cpu = CpuRecord(elapsed=1.0, wait=1.25)
+    out = render_ascii(sample_run, width=100, top=2)
+    assert "tests/test_a.py::test_two  waited 1.25s for cpu, waited 0.30s for memory" in out
+    for line in out.splitlines():
+        assert len(line) <= 100, line
+    assert "waited" not in render_ascii(sample_run, width=100, top=0)
+
+
 def test_color_only_wraps_glyphs(sample_run: Run) -> None:
     plain = render_ascii(sample_run, width=80)
     colored = render_ascii(sample_run, width=80, color=True)

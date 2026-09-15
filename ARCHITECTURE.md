@@ -388,27 +388,45 @@ happens only when nothing runs in the domain, so nothing else's memory is at ris
 Pressure feedback moves only the CPU limit.
 
 Demand comes from history, never from declarations. `Estimates.from_run` keeps, per
-test, the largest `peak - base` any attempt showed (the worst case is what an
-out-of-memory kill depends on), and per shared fixture key the memory the attempt that
-paid its set-up kept resident (`after - base`, split evenly when one attempt paid for
-several). `Costs.charge` adds a `memory` to each `Charge`: the test's rise plus what
-the fixtures alive around it keep, projected through the lane's fixture state exactly
-as CPU holds are, since workers report nothing about memory at run time. A fixture with
-recorded memory belongs to its tests' families even when its set-up was too quick to
-matter for time. `_need_memory` is the twin of `_need`; an idle worker reserves what
-its fixtures keep, and a worker whose next test could never fit next to what the
-other workers' fixtures keep is parked like one blocked by CPU holds. A fixture
-reached at run time adds its recorded memory to the queued charges when its
-request is granted.
+test, the largest need any attempt showed (the worst case is what an out-of-memory
+kill depends on), and per shared fixture key the memory the attempt that paid its
+set-up kept resident (`after - base`, split evenly when one attempt paid for
+several). A payer's rise spans its set-ups, so its own need is `peak - after`: what
+it used beyond what stayed, which is the fixtures'. Session- and package-scoped
+fixtures are the exception: what they keep is every worker's baseline
+(`is_baseline`), never attributed, charged or projected. Every worker sets them up
+once and never lets go, so gating on them cannot spare the host; it can only hold
+tests back, or park a worker until stall resolution shuts it down, which is what a
+large session fixture did before this rule. The first attempt on each worker is a
+warm-up window (lazy imports, caches, the allocator's first growth), so its rise and
+residual count only for a test or fixture with no other attempt.
+
+`Costs.charge` adds a `memory` to each `Charge`: the test's need plus what the
+module- and class-scoped fixtures alive around it keep, projected through the lane's
+fixture state exactly as CPU holds are, since workers report nothing about memory at
+run time. A fixture with recorded memory belongs to its tests' families even when its
+set-up was too quick to matter for time. `_need_memory` is the twin of `_need`; an
+idle worker reserves what its fixtures keep, and a worker whose next test could never
+fit next to what the other workers' fixtures keep is parked like one blocked by CPU
+holds. A fixture reached at run time adds its recorded memory to the queued charges
+when its request is granted.
 
 The budget is `--timing-memory`: a size, or `auto`, which takes 80% of the smallest
 memory the domain's workers report (physical memory capped by the cgroup limit,
 `memory.max` on v2 and `memory.limit_in_bytes` on v1, read like the CPU quota). The
 share is deliberate: estimates are rises above each worker's footprint, and the
-footprints, the controller and the rest of the host are not in them. Without a
-recorded run every estimate is zero and the gate admits everything; the summary says
-so. The planner ignores memory: with tests kept apart by the gate, balancing lanes by
-memory would add little, and the lane plan can still move.
+footprints (session fixtures included), the controller and the rest of the host are
+not in them. Without a recorded run every estimate is zero and the gate admits
+everything; the summary says so. The planner ignores memory: with tests kept apart by
+the gate, balancing lanes by memory would add little, and the lane plan can still move.
+
+Every `Admission` has a `kind` (`cpu` or `memory`), and a refusal records which kinds
+refused (`refused`), as does passing a test over for what other workers keep. When
+the worker is admitted, the wait it records (`AdmissionWait.gates`) says which gates
+held it, and the collector puts it on the test's `cpu.wait` or `memory.wait`
+accordingly. A worker that leaves while parked, having run nothing it waited for,
+has no test to carry its wait: `_release_runtime` records it in `parked`, and each
+gate's summary reports the parked time and worker count beside the tests' waits.
 
 ## Measuring CPU work
 

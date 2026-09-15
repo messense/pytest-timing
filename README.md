@@ -102,7 +102,10 @@ of the worker's process tree around each test, in bytes: `base` before its set-u
 `peak` during it, and `after` at its teardown. The difference between `peak` and
 `base` is what the test needed on top of the worker's existing footprint; `after`
 minus `base` is what stayed, such as a shared fixture it set up. With
-`--timing-memory`, the run's `memory` describes the budget and how admission went.
+`--timing-memory`, the run's `memory` describes the budget and how admission went,
+and a test the memory gate held back carries the seconds it waited in `memory.wait`,
+as `cpu.wait` does for the CPU gate; the HTML report's table and hover details and
+the terminal's slowest-tests rows show them.
 It also records worker
 lifecycles, detected host CPU environments, and how the session ended (`finished`,
 `collect_only`, `interrupted`, `aborted`, `internal_error`, with pytest's reason). It is
@@ -242,8 +245,8 @@ What to expect:
   forces the oldest blocked request if needed. Such forced reservations can exceed
   the limit and are counted in the summary.
 - The summary reports the budget, the number of tests over one slot, and how long
-  tests waited for slots in total. Each test's JSON record carries its own wait.
-  `cpu.runtime_wait` records admission waits inside a running test. These waits
+  tests waited for slots in total. Each test's JSON record carries its own wait in
+  `cpu.wait`. `cpu.runtime_wait` records admission waits inside a running test. These waits
   are excluded from duration estimates, fixture setup costs and measured CPU rate.
   A runtime request that gets no grant within five minutes cancels the fixture
   setup. It waits to recover the test's original reservation before failing, so
@@ -279,18 +282,26 @@ pytest -n 4 --timing-json --timing-schedule pytest-timing.json --timing-memory 1
 takes 80% of physical memory, capped by the cgroup memory limit. It reads the memory
 each test needed from the run at `--timing-schedule`, so the first run only records;
 the summary says how many tests had recorded memory. A test with no record weighs
-nothing until it has run once. A shared fixture keeps what its first test left resident
-(a loaded model, say) reserved for as long as it is alive, on that worker.
+nothing until it has run once. A module- or class-scoped fixture keeps what its first
+test left resident (a loaded model, say) reserved for as long as it is alive, on that
+worker. What session- and package-scoped fixtures keep is treated as part of every
+worker's footprint instead: each worker sets them up once and never lets go, so
+gating on them could only delay the run, never spare the host.
 
 What to expect:
 
 - The gate is the same fair waiting line as for CPU: a worker whose next test does
   not fit waits with its fixtures alive, and the oldest request goes first. Memory
   and CPU budgets are checked together; a test starts only when both fit.
-- Estimates are the largest rise any recorded attempt showed. They are relative to
+- Estimates are the largest need any recorded attempt showed. For an attempt that
+  set up shared fixtures, what stayed resident afterwards is the fixtures' (or the
+  worker's footprint), and the test's own need is what it used beyond that. The
+  first test on each worker also pays for the worker's warm-up, so its record is
+  used only for a test or fixture with no other attempt. Estimates are relative to
   the worker's footprint, so `auto` leaves a fifth of the host for the workers
-  themselves, the controller and everything else; set a smaller budget on a shared
-  machine.
+  themselves, their session fixtures, the controller and everything else; set a
+  smaller budget on a shared machine, and a larger share of headroom when session
+  fixtures are big.
 - A test recorded above the budget runs alone, and the summary counts it. Allocator
   behaviour can make an estimate low: a test that reuses heap an earlier test freed
   shows a smaller rise than it needs. Large buffers and subprocesses, the usual
@@ -298,6 +309,9 @@ What to expect:
 - Memory does not enter the planner: lanes are still balanced by duration and fixture
   cost, and the gate only delays starts. Under `--dist load` and `worksteal`, like
   CPU admission.
+- The summary says how many tests waited for memory and for how long, and how long
+  workers sat parked at the gate without running what they waited for. Each held
+  test's JSON record carries its wait in `memory.wait`.
 
 ## Re-render or merge saved runs
 

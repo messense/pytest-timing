@@ -693,11 +693,15 @@ def test_repeated_timeouts_keep_waits_with_the_attempt_that_waited(
 @pytest_timing.cpu(2)
 def heavy(): return 42
 def test_a_competing():
+    # Hold the slot until the other test has asked for the fixture, then long
+    # enough for that request to time out at least once, whatever the host's pace.
     Path("running").touch()
-    time.sleep(.18)
+    wait_for("requested")
+    time.sleep(.15)
 @pytest.mark.flaky(reruns=4)
 def test_b_dynamic(request):
     wait_for("running")
+    Path("requested").touch()
     assert request.getfixturevalue("heavy") == 42
 """
     )

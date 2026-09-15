@@ -212,14 +212,17 @@ class MemoryRecord:
     ``peak`` the highest reading until the teardown report, ``after`` the reading at
     that report. ``coverage`` says whether descendants were counted (``tree``) or
     only the worker (``self``). A worker's heap rarely shrinks, so ``rise`` is
-    what the attempt needed on top of what was already there, and ``retained`` what
-    stayed resident afterwards: a shared fixture it set up, or a leak.
+    what the attempt needed on top of what was already there, ``retained`` what
+    stayed resident afterwards (a shared fixture it set up, or a leak), and
+    ``transient`` the rest: what it needed beyond what stayed. ``wait`` is how long
+    memory admission held the attempt back before it started, in seconds.
     """
 
     base: int = 0
     peak: int = 0
     after: int = 0
     coverage: str = "none"
+    wait: float = 0.0
 
     @property
     def rise(self) -> int:
@@ -229,13 +232,25 @@ class MemoryRecord:
     def retained(self) -> int:
         return max(0, self.after - self.base)
 
+    @property
+    def transient(self) -> int:
+        return max(0, self.peak - self.after)
+
+    @property
+    def measured(self) -> bool:
+        """Did the platform give a reading? A live process is never resident at zero."""
+        return self.peak > 0
+
     def to_dict(self) -> dict[str, Any]:
-        return {
+        doc: dict[str, Any] = {
             "base": self.base,
             "peak": self.peak,
             "after": self.after,
             "coverage": self.coverage,
         }
+        if self.wait:
+            doc["wait"] = _round(self.wait)
+        return doc
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> MemoryRecord:
@@ -244,6 +259,7 @@ class MemoryRecord:
             peak=int(data.get("peak", 0)),
             after=int(data.get("after", 0)),
             coverage=str(data.get("coverage", "none")),
+            wait=float(data.get("wait", 0.0)),
         )
 
 

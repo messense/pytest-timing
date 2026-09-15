@@ -27,9 +27,21 @@ def test_waits_use_execution_identity_and_accumulate_across_requests() -> None:
     collector.add_wait("gw0", "test.py::test_same", 9, 0, 0.4)
     collector.add_wait("gw1", "test.py::test_same", 4, 0, 0.6)
     collector.add_wait("gw0", "test.py::test_same", 100, 0, 9)  # never guess another execution
+    collector.add_wait("gw1", "test.py::test_same", 4, 0, 0.7, gates={"memory"})
+    collector.add_wait("gw1", "test.py::test_same", 4, 0, 0.2, gates={"cpu", "memory"})
     run = collector.finish(T0 + 5, termination="finished")
-    assert [t.cpu.wait for t in run.tests if t.cpu] == pytest.approx([0.5, 0.1, 0.4, 0.6])
+    assert [t.cpu.wait for t in run.tests if t.cpu] == pytest.approx([0.5, 0.1, 0.4, 0.8])
     assert [(t.occurrence, t.attempt) for t in run.tests] == [(0, 0), (0, 1), (1, 0), (0, 0)]
+    # A wait at the memory gate goes on the memory record, even without a reading.
+    assert [t.memory.wait for t in run.tests if t.memory] == pytest.approx([0.9])
+    assert run.tests[-1].memory is not None and not run.tests[-1].memory.measured
+    assert run.tests[-1].to_dict()["memory"] == {
+        "base": 0,
+        "peak": 0,
+        "after": 0,
+        "coverage": "none",
+        "wait": 0.9,
+    }
 
 
 def test_phases_fold_into_one_span() -> None:

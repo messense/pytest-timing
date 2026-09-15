@@ -40,8 +40,9 @@ class Admission:
     RECOVER_AFTER = 8
     COOLDOWN = 10.0
 
-    def __init__(self, budget: int, name: str = "local") -> None:
+    def __init__(self, budget: int, name: str = "local", kind: str = "cpu") -> None:
         self.name = name
+        self.kind = kind  # what the slots are: ``cpu`` or ``memory`` (bytes)
         self.budget = max(1, int(budget))
         self.limit = self.budget
         self.reserved: dict[Hashable, Reservation] = {}

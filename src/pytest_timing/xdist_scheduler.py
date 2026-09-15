@@ -74,9 +74,13 @@ class CpuSetup:
 @dataclass(frozen=True)
 class AdmissionWait:
     worker: str
-    index: int
+    index: int  # -1 for a worker that was parked and never ran what it waited for
     attempt: int
     seconds: float
+    gates: frozenset[str] = frozenset()  # the gate kinds that refused: cpu, memory
+
+    def held_by(self, kind: str) -> bool:
+        return kind in self.gates or not self.gates
 
 
 @dataclass(frozen=True)
@@ -127,7 +131,9 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
         self.domain: dict[WorkerController, str] = {}
         self.hosts: dict[str, dict[str, Any]] = {}  # what each domain's workers detected
         self.waiting: dict[WorkerController, float] = {}  # since when its head waits
+        self.refused: dict[WorkerController, set[str]] = {}  # which gate kinds held it
         self.waits: list[AdmissionWait] = []
+        self.parked: list[AdmissionWait] = []  # waits of workers that then ran nothing
         self.rates: dict[str, float] = {}  # last measured CPU rate per worker id
         self.last_sample = -math.inf
         self.cancelled: dict[WorkerController, set[int]] = {}  # withdrawn, never run
@@ -251,7 +257,7 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
         queued = self.node2pending.pop(node)
         lane = self.lanes.pop(node)
         self.dispatched.pop(node, None)
-        self._release_runtime(node)
+        self._release_runtime(node, idle=not queued)
         self.cancelled.pop(node, None)
         self.finished.discard(node)
         self.domain.pop(node, None)
@@ -282,13 +288,20 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
         if node not in self.node2pending:
             return
         self.finished.add(node)
-        self._release_runtime(node)
+        self._release_runtime(node, idle=not self.node2pending[node])
         self._admit_waiting()
 
-    def _release_runtime(self, node: WorkerController) -> None:
+    def _release_runtime(self, node: WorkerController, idle: bool = False) -> None:
+        """Forget ``node``'s run-time state. ``idle`` says it held no test: a wait
+        it was in is then a parked worker's, with no test to record it on."""
         self.requests.pop(node, None)
         self.live_holds.pop(node, None)
-        self.waiting.pop(node, None)
+        since = self.waiting.pop(node, None)
+        gates = frozenset(self.refused.pop(node, ()))
+        if since is not None and idle and self.clock() - since > 0:
+            self.parked.append(
+                AdmissionWait(xdist_compat.node_id(node), -1, 0, self.clock() - since, gates)
+            )
         self.rates.pop(xdist_compat.node_id(node), None)
         for admission in self._gates(node):
             admission.release(node)
@@ -380,19 +393,25 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
                 if not transfer(costs, self._live_lanes(), lane, self._slots()):
                     break
             position = charge = None
+            blocked: set[str] = set()  # the gate kinds that passed tests over
             for i, index in enumerate(lane.plan):
                 charge = costs.charge(index, lane.fixtures)
                 # Could it never run here while the other workers keep what they
                 # hold now? Only their exit would make room: pass it over.
-                if (not elsewhere or min(charge.peak, limit_slots) + elsewhere <= limit_slots) and (
-                    not kept_elsewhere
-                    or min(charge.memory, limit_bytes) + kept_elsewhere <= limit_bytes
+                if elsewhere and min(charge.peak, limit_slots) + elsewhere > limit_slots:
+                    blocked.add("cpu")
+                elif (
+                    kept_elsewhere
+                    and min(charge.memory, limit_bytes) + kept_elsewhere > limit_bytes
                 ):
+                    blocked.add("memory")
+                else:
                     position = i
                     break
             if position is None or charge is None:
                 if not queue and not out:
                     self.waiting.setdefault(node, self.clock())  # parked
+                    self.refused.setdefault(node, set()).update(blocked)
                 break
             if queue and not self._grant(node):
                 break
@@ -458,7 +477,7 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
                 ]
                 size = int(min(offered) * AUTO_MEMORY_SHARE) if offered else 0
             if size > 0:
-                self.memory_admissions[domain] = Admission(size, domain)
+                self.memory_admissions[domain] = Admission(size, domain, kind="memory")
 
     @property
     def gated(self) -> bool:
@@ -602,9 +621,11 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
         assert needs
         lane = self.lanes[node]
         rising = [(gate, need) for gate, need in needs if need > gate.held(node)]
-        if not all(gate.fits(node, need, lane.free) for gate, need in rising):
+        refusing = [gate.kind for gate, need in rising if not gate.fits(node, need, lane.free)]
+        if refusing:
             if wait:
                 since = self.waiting.setdefault(node, self.clock())
+                self.refused.setdefault(node, set()).update(refusing)
                 for gate, need in needs:
                     gate.wait(node, need, since)
             return False
@@ -637,6 +658,7 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
         for gate in self._gates(node):
             gate.admitted(node)
         since = self.waiting.pop(node, None)
+        gates = frozenset(self.refused.pop(node, ()))
         if since is not None:
             queue = self.node2pending[node]
             waited = self.clock() - since
@@ -644,7 +666,9 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
                 request = self.requests.get(node)
                 index = request.index if request is not None else queue[0]
                 attempt = request.attempt if request is not None else 0
-                self.waits.append(AdmissionWait(xdist_compat.node_id(node), index, attempt, waited))
+                self.waits.append(
+                    AdmissionWait(xdist_compat.node_id(node), index, attempt, waited, gates)
+                )
 
     def _reserve(self, node: WorkerController) -> None:
         """Recompute ``node``'s reservation from what it may run without another word."""
@@ -703,6 +727,7 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
             self.cancelled.setdefault(node, set()).add(tail)
             self.withdrawn += 1
             self.waiting.pop(node, None)  # it never ran: no wait to record
+            self.refused.pop(node, None)
             for gate, need in self._needs(node, queue):
                 gate.admitted(node)
                 gate.assign(node, need, lane.free, busy=len(queue) > 1)
@@ -951,9 +976,20 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
             "gated": self.gated,
             "domains": domains,
             "heavy_tests": heavy,
-            "waited": round(sum(w.seconds for w in self.waits), 6),
-            "waited_tests": len({(w.worker, w.index, w.attempt) for w in self.waits}),
+            **self._waits("cpu"),
             "cancelled": self.withdrawn,
+        }
+
+    def _waits(self, kind: str) -> dict[str, Any]:
+        """How long tests waited at the gates of ``kind``, and how long workers sat
+        parked at them without ever running what they waited for."""
+        waits = [w for w in self.waits if w.held_by(kind)]
+        parked = [w for w in self.parked if w.held_by(kind)]
+        return {
+            "waited": round(sum(w.seconds for w in waits), 6),
+            "waited_tests": len({(w.worker, w.index, w.attempt) for w in waits}),
+            "parked": round(sum(w.seconds for w in parked), 6),
+            "parked_workers": len({w.worker for w in parked}),
         }
 
     def memory_summary(self) -> dict[str, Any] | None:
@@ -977,8 +1013,7 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
             "tests": total,
             "known_tests": known,
             "largest": largest,
-            "waited": round(sum(w.seconds for w in self.waits), 6),
-            "waited_tests": len({(w.worker, w.index, w.attempt) for w in self.waits}),
+            **self._waits("memory"),
         }
 
     def _check_stealing(self, node: WorkerController) -> None:

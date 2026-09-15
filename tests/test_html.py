@@ -64,6 +64,21 @@ def test_report_executes_in_a_browser(sample_run: Run, tmp_path: Path) -> None:
 
 
 @needs_chrome
+def test_report_shows_how_long_admission_held_a_test(sample_run: Run, tmp_path: Path) -> None:
+    from pytest_timing.model import CpuRecord, MemoryRecord
+
+    dom = _chrome_dom(sample_run, tmp_path)
+    assert "Held</th>" not in dom  # nothing waited: no column
+    two = next(t for t in sample_run.tests if t.nodeid.endswith("test_two"))
+    two.memory = MemoryRecord(base=1, peak=2, after=1, coverage="self", wait=0.3)
+    two.cpu = CpuRecord(elapsed=1.0, wait=1.25)
+    dom = _chrome_dom(sample_run, tmp_path)
+    assert "Held</th>" in dom
+    assert 'title="1.25s for cpu, 300.0ms for memory">1.55s</td>' in dom
+    assert dom.count('title="">-</td>') == len(sample_run.tests) - 1
+
+
+@needs_chrome
 def test_large_report_executes_in_a_browser(tmp_path: Path) -> None:
     """150k tests on one lane: no argument-limit errors, merged bars, capped table."""
     c = Collector(make_info())

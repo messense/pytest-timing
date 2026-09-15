@@ -122,8 +122,10 @@ def render_ascii(
                     bar = f"{_RED}{bar}{_RESET}"
                 duration = f"{format_seconds(test.duration):>7}"
                 lines.append(f"{test.worker:<{label_width}} {bar} {duration}")
-                nodeid = _fit_nodeid(test.nodeid, width - label_width - 1, glyphs.ellipsis)
-                lines.append(f"{'':<{label_width}} {nodeid}")
+                held = _held(test)
+                room = width - label_width - 1 - (len(held) + 2 if held else 0)
+                nodeid = _fit_nodeid(test.nodeid, room, glyphs.ellipsis)
+                lines.append(f"{'':<{label_width}} {nodeid}{'  ' + held if held else ''}")
     return "\n".join(lines)
 
 
@@ -263,6 +265,16 @@ def _test_bar(test: TestSpan, scale: Scale, glyphs: Glyphs) -> str:
         for i in range(first, last):
             row[i] = glyphs.bad if test.is_bad else glyphs.call
     return "".join(row)
+
+
+def _held(test: TestSpan) -> str:
+    """How long admission held the test back before it started, and at which gate."""
+    parts = []
+    if test.cpu is not None and test.cpu.wait:
+        parts.append(f"waited {format_seconds(test.cpu.wait)} for cpu")
+    if test.memory is not None and test.memory.wait:
+        parts.append(f"waited {format_seconds(test.memory.wait)} for memory")
+    return ", ".join(parts)
 
 
 def _fit_nodeid(nodeid: str, room: int, ellipsis: str) -> str:

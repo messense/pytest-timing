@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+- Memory admission no longer charges what session- and package-scoped fixtures keep
+  resident. Every worker sets them up once and never lets go, so counting them once
+  per lane, and again against every other lane, could only hold tests back or park
+  a worker until it was shut down: on a suite with a large session fixture the gate
+  left two of eight workers nearly idle and made the run almost three times longer
+  while the host had tens of gigabytes free. Their memory is now the worker's
+  baseline, which the budget's headroom covers (#7).
+- Memory estimates are what a test needs of its own. An attempt that set up shared
+  fixtures was charged its whole rise and, again, what the fixtures kept, twice the
+  residual; its own need is now the rise beyond what stayed. The first attempt on
+  each worker, whose window also covers the worker's warm-up, counts only for a
+  test or fixture with no other attempt (#7).
+- Waits say which gate held the test. A test the memory gate held back carries the
+  seconds in `memory.wait`, beside `cpu.wait` for CPU slots, and the summary line
+  reports memory waits even when a CPU budget is set. Time a worker sat parked and
+  then left without running what it waited for is reported per gate as well, instead
+  of vanishing. The HTML report's table gains a "Held" column and its hover details a
+  "held" line, and the terminal's slowest-tests rows say how long each was held (#7).
+
 ## 0.3.0
 
 - Estimate a test's cost from the median of its best attempts instead of its

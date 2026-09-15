@@ -209,7 +209,18 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
     t.m = moduleIndex[t.module];
     t.ph = {};
     PHASES.forEach(function (p) { var v = t.phases && t.phases[p]; if (v) t.ph[p] = { start: v[0], stop: v[1], dur: v[2] }; });
+    // Admission waits: how long the controller held the test back before it started, per gate.
+    t.cpuWait = (t.cpu && t.cpu.wait) || 0;
+    t.memWait = (t.memory && t.memory.wait) || 0;
+    t.waited = t.cpuWait + t.memWait;
   });
+  var ANY_WAITED = TESTS.some(function (t) { return t.waited > 0; });
+  function heldText(t) {
+    var parts = [];
+    if (t.cpuWait) parts.push(fmt(t.cpuWait) + ' for cpu');
+    if (t.memWait) parts.push(fmt(t.memWait) + ' for memory');
+    return parts.join(', ');
+  }
   var laneIds = WORKERS.map(function (w) { return w.id; }), laneIndex = {};
   laneIds.forEach(function (id, i) { laneIndex[id] = i; });
   TESTS.forEach(function (t) { if (!(t.worker in laneIndex)) { laneIndex[t.worker] = laneIds.length; laneIds.push(t.worker); } });
@@ -470,6 +481,7 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
     ['idx', '#'], ['nodeid', 'Test'], ['worker', 'Worker'], ['dur', 'Total'],
     ['setup', 'Setup'], ['call', 'Call'], ['teardown', 'Teardown'], ['outcome', 'Outcome'], ['start', 'Start']
   ];
+  if (ANY_WAITED) COLS.push(['waited', 'Held']);
   function sortVal(t, key) {
     if (key === 'idx') return t.i;
     if (PHASES.indexOf(key) >= 0) return t.ph[key] ? t.ph[key].dur : 0;
@@ -485,9 +497,10 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
       rows.push('<tr><td class="num">' + (n + 1) + '</td><td class="nodeid mono">' + esc(t.nodeid) + (t.attempt ? ' <span class="muted">(attempt ' + (t.attempt + 1) + ')</span>' : '') + '</td><td class="mono">' + esc(t.worker) + '</td>' +
         '<td class="num">' + fmt(t.dur) + '</td>' +
         PHASES.map(function (p) { var ph = t.ph[p]; return '<td class="num">' + (ph ? fmt(ph.dur) + pct(ph.dur, t.dur) : '-') + '</td>'; }).join('') +
-        '<td class="o-' + t.outcome + '">' + esc(t.outcome) + '</td><td class="num">' + fmt(t.start) + '</td></tr>');
+        '<td class="o-' + t.outcome + '">' + esc(t.outcome) + '</td><td class="num">' + fmt(t.start) + '</td>' +
+        (ANY_WAITED ? '<td class="num" title="' + esc(heldText(t)) + '">' + (t.waited ? fmt(t.waited) : '-') + '</td>' : '') + '</tr>');
     });
-    document.querySelector('#tests-table tbody').innerHTML = rows.join('') || '<tr><td colspan="9" class="empty">No tests match the current filters.</td></tr>';
+    document.querySelector('#tests-table tbody').innerHTML = rows.join('') || '<tr><td colspan="' + COLS.length + '" class="empty">No tests match the current filters.</td></tr>';
     document.getElementById('table-note').textContent = tests.length > TABLE_CAP ? '(showing ' + TABLE_CAP + ' of ' + tests.length + ')' : '(' + tests.length + ' of ' + TESTS.length + ')';
   }
 
@@ -528,7 +541,7 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
   }
   function tipForTest(t) {
     return '<b>' + esc(t.nodeid) + '</b><br>' + esc(t.outcome) + ' on ' + esc(t.worker) + (t.attempt ? ' (attempt ' + (t.attempt + 1) + ')' : '') +
-      '<br>total ' + fmt(t.dur) + ', started at ' + fmt(t.start) + phaseRows(t);
+      '<br>total ' + fmt(t.dur) + ', started at ' + fmt(t.start) + (t.waited ? '<br>held ' + esc(heldText(t)) : '') + phaseRows(t);
   }
   function tipForCluster(c) {
     var top = c.tests.slice().sort(function (a, b) { return b.dur - a.dur; }).slice(0, 10);

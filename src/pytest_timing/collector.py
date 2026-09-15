@@ -14,6 +14,7 @@ correct span; they do not change that public occurrence/attempt numbering.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -83,12 +84,19 @@ class Collector:
         worker.items = items
 
     def add_wait(
-        self, worker_id: str, nodeid: str, index: int, attempt: int, seconds: float
+        self,
+        worker_id: str,
+        nodeid: str,
+        index: int,
+        attempt: int,
+        seconds: float,
+        gates: Iterable[str] = (),
     ) -> None:
         """Add an admission delay to the exact execution that waited.
 
         A nodeid can have several selections and retries. Looking up its last span
-        at session finish would put every delay on the final one instead.
+        at session finish would put every delay on the final one instead. ``gates``
+        names what held the test (``cpu``, ``memory``); unnamed, the CPU gate did.
         """
         span = self._executions.get((worker_id, index, attempt))
         if span is None:
@@ -98,9 +106,15 @@ class Collector:
             span = self._last.get((worker_id, nodeid))
             if span is None or span.outcome != "crashed" or span.phases or span.attempt != attempt:
                 return
-        if span.cpu is None:
-            span.cpu = CpuRecord(elapsed=span.duration)
-        span.cpu.wait += seconds
+        gates = set(gates)
+        if "cpu" in gates or not gates:
+            if span.cpu is None:
+                span.cpu = CpuRecord(elapsed=span.duration)
+            span.cpu.wait += seconds
+        if "memory" in gates:
+            if span.memory is None:
+                span.memory = MemoryRecord()  # no reading, but the wait is a fact
+            span.memory.wait += seconds
 
     def worker_down(self, worker_id: str, epoch: float, error: str | None) -> None:
         worker = self._worker(worker_id)

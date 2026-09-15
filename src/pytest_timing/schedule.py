@@ -13,7 +13,8 @@ from pathlib import Path
 from statistics import fmean, median
 
 from pytest_timing.demand import Declarations, key_base
-from pytest_timing.model import Run
+from pytest_timing.fixtures import key_scope
+from pytest_timing.model import Run, TestSpan
 
 Family = frozenset[str]
 NO_FIXTURES: Family = frozenset()
@@ -23,6 +24,29 @@ EPSILON = 1e-9
 SPLIT_GAIN = 0.01
 """A family is split over more workers only for at least this much predicted gain:
 duplicated set-ups are real cost, and gains this small are within estimate noise."""
+BASELINE_SCOPES = frozenset({"session", "package"})
+"""Scopes whose fixtures' memory is part of the worker's footprint, not a test's need:
+every worker sets them up once and keeps them, so gating on them could only delay
+the run, never spare the host. The budget's headroom is what covers them."""
+
+
+def is_baseline(key: str) -> bool:
+    """Does the fixture behind ``key`` keep memory as a per-worker baseline?"""
+    return key_scope(key) in BASELINE_SCOPES
+
+
+def _warm_ups(run: Run) -> set[int]:
+    """Ids of the first attempt each worker ran.
+
+    Its memory window also covers the worker's warm-up (lazy imports, caches, the
+    allocator's first growth), which is neither the test's need nor a fixture's.
+    """
+    first: dict[str, TestSpan] = {}
+    for test in run.tests:
+        current = first.get(test.worker)
+        if current is None or test.start < current.start:
+            first[test.worker] = test
+    return {id(test) for test in first.values()}
 
 
 @cache
@@ -89,16 +113,21 @@ class Estimates:
         does not grow with the number of attempts the way the longest one does, so a
         history merged from many runs stays comparable to a single run.
 
-        Memory is the opposite: the largest rise any attempt showed, since the worst
-        case is what an out-of-memory kill depends on. What an attempt kept resident
-        after paying for shared set-ups is attributed to those fixtures, split evenly
-        when it paid for several at once, again keeping the largest.
+        Memory is the opposite: the largest need any attempt showed, since the worst
+        case is what an out-of-memory kill depends on. An attempt that paid for shared
+        set-ups needed its whole rise, but what stayed resident afterwards is the
+        fixtures' (split evenly when it paid for several at once) or, for session and
+        package scope, the worker's baseline; the test's own need is the rest
+        (``transient``). The first attempt on each worker also covers the worker's
+        warm-up, so its memory counts only for a test or fixture that has no other
+        attempt.
         """
         attempts: dict[str, dict[int, list[float]]] = {}  # nodeid -> rank -> own seconds
         families: dict[str, set[str]] = {}
         setups: dict[str, list[float]] = {}
-        memory: dict[str, int] = {}
-        retained: dict[str, int] = {}
+        memory: dict[bool, dict[str, int]] = {False: {}, True: {}}  # warm-up? -> bytes
+        retained: dict[bool, dict[str, int]] = {False: {}, True: {}}
+        warm_ups = _warm_ups(run)
         for test in run.tests:
             paid = []
             if test.fixtures:
@@ -107,12 +136,16 @@ class Estimates:
                     if seconds:
                         setups.setdefault(key, []).append(seconds)
                         paid.append(key)
-            if test.memory is not None:
-                memory[test.nodeid] = max(memory.get(test.nodeid, 0), test.memory.rise)
+            if test.memory is not None and test.memory.measured:
+                warm = id(test) in warm_ups
+                rises, keeps = memory[warm], retained[warm]
+                need = test.memory.transient if paid else test.memory.rise
+                rises[test.nodeid] = max(rises.get(test.nodeid, 0), need)
                 if paid and test.memory.retained:
                     share = test.memory.retained // len(paid)
                     for key in paid:
-                        retained[key] = max(retained.get(key, 0), share)
+                        if not is_baseline(key):
+                            keeps[key] = max(keeps.get(key, 0), share)
             if test.outcome == "crashed":
                 continue  # the recorded stop is the worker's death, not the test's
             own = test.duration - test.shared_setup
@@ -132,8 +165,8 @@ class Estimates:
             source,
             {nodeid: frozenset(keys) for nodeid, keys in families.items()},
             {key: median(seconds) for key, seconds in setups.items()},
-            memory,
-            retained,
+            {**memory[True], **memory[False]},  # a clean attempt beats a warm-up one
+            {**retained[True], **retained[False]},
         )
 
     @classmethod
@@ -168,7 +201,10 @@ class Estimates:
         return self.memory.get(nodeid, 0)
 
     def kept(self, key: str) -> int:
-        """Bytes a shared fixture instance keeps resident while alive; unknown is zero."""
+        """Bytes a shared fixture instance keeps resident while alive; unknown is zero,
+        and so is a session or package fixture, whose memory is the worker's baseline."""
+        if is_baseline(key):
+            return 0
         return self.retained.get(key, 0)
 
 
@@ -182,10 +218,11 @@ class Costs:
     tests' families even when no run has timed it yet; one a recorded run reports a
     test using without naming it (``getfixturevalue``) is matched by definition.
 
-    Memory comes from history alone: the bytes each test rose by, and the bytes each
-    shared fixture instance keeps resident. A fixture kept for its memory belongs to
-    its tests' families like a declared one, so the planner keeps it alive on the
-    lane that pays for it and the gate knows it is there.
+    Memory comes from history alone: the bytes each test needs of its own, and the
+    bytes each module- or class-scoped fixture instance keeps resident. A fixture kept
+    for its memory belongs to its tests' families like a declared one, so the planner
+    keeps it alive on the lane that pays for it and the gate knows it is there. What
+    session and package fixtures keep is every worker's baseline and is not charged.
     """
 
     def __init__(

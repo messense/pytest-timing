@@ -15,45 +15,100 @@ from pytest_timing.schedule import Costs, Estimates
 
 MIB = 1024 * 1024
 SESSION = "session::/repo/conftest.py::model"
+PACKAGE = "package:tests:/repo/tests/conftest.py::cache"
+MODULE = "module:t.py:/repo/t.py::db"
 
 
-def test_estimates_take_the_largest_rise_and_attribute_retained_memory_to_fixtures() -> None:
+def test_estimates_take_the_largest_need_and_attribute_retained_memory_to_fixtures() -> None:
     c = Collector(make_info())
-    full_test(c, "t.py::a", 0.0)
-    c.tests[-1].memory = MemoryRecord(base=100 * MIB, peak=300 * MIB, after=110 * MIB)
-    full_test(c, "t.py::a", 1.0)  # a second attempt that needed more
-    c.tests[-1].memory = MemoryRecord(base=110 * MIB, peak=360 * MIB, after=110 * MIB)
-    full_test(c, "t.py::b", 2.0)  # paid two set-ups and kept 400 MiB: 200 each
-    c.tests[-1].fixtures = {SESSION: 0.5, "module:t.py:/repo/t.py::db": 0.2}
-    c.tests[-1].memory = MemoryRecord(base=100 * MIB, peak=600 * MIB, after=500 * MIB)
-    full_test(c, "t.py::c", 3.0)  # no record at all
-    run = c.finish(make_info().start + 4, termination="finished")
+    full_test(c, "t.py::warm", 0.0)  # first on gw0: its window covers the warm-up
+    c.tests[-1].memory = MemoryRecord(
+        base=100 * MIB, peak=900 * MIB, after=800 * MIB, coverage="self"
+    )
+    full_test(c, "t.py::a", 1.0)
+    c.tests[-1].memory = MemoryRecord(
+        base=100 * MIB, peak=300 * MIB, after=110 * MIB, coverage="self"
+    )
+    full_test(c, "t.py::a", 2.0)  # a second attempt that needed more
+    c.tests[-1].memory = MemoryRecord(
+        base=110 * MIB, peak=360 * MIB, after=110 * MIB, coverage="self"
+    )
+    full_test(c, "t.py::b", 3.0)  # paid two set-ups and kept 400 MiB: 200 each
+    c.tests[-1].fixtures = {SESSION: 0.5, MODULE: 0.2}
+    c.tests[-1].memory = MemoryRecord(
+        base=100 * MIB, peak=600 * MIB, after=500 * MIB, coverage="self"
+    )
+    full_test(c, "t.py::c", 4.0)  # no record at all
+    full_test(c, "t.py::d", 5.0)  # a wait, but no reading
+    c.tests[-1].memory = MemoryRecord(wait=0.5)
+    run = c.finish(make_info().start + 6, termination="finished")
     est = Estimates.from_run(run)
     assert est.rise("t.py::a") == 250 * MIB
-    assert est.rise("t.py::b") == 500 * MIB
+    # The payer needed its whole rise, but what stayed is the fixtures' (or the
+    # worker's baseline); its own need is what it used beyond that.
+    assert est.rise("t.py::b") == 100 * MIB
     assert est.rise("t.py::c") == 0 and "t.py::c" not in est.memory
-    assert est.kept(SESSION) == 200 * MIB
-    assert est.kept("module:t.py:/repo/t.py::db") == 200 * MIB
+    assert est.rise("t.py::d") == 0 and "t.py::d" not in est.memory
+    assert est.kept(SESSION) == 0 and SESSION not in est.retained  # baseline, not a need
+    assert est.kept(MODULE) == 200 * MIB
     assert est.kept("nothing") == 0
+    # The warm-up window counts only while nothing better is known.
+    assert est.rise("t.py::warm") == 800 * MIB
+    full_test(c, "t.py::warm", 6.0, worker="gw1")  # not the first on its worker
+    c.tests[-1].memory = MemoryRecord(
+        base=100 * MIB, peak=150 * MIB, after=100 * MIB, coverage="self"
+    )
+    full_test(c, "t.py::e", 5.0, worker="gw1")  # gw1's warm-up: earlier, if reported later
+    c.tests[-1].memory = MemoryRecord(
+        base=100 * MIB, peak=700 * MIB, after=600 * MIB, coverage="self"
+    )
+    est = Estimates.from_run(c.finish(make_info().start + 8, termination="finished"))
+    assert est.rise("t.py::warm") == 50 * MIB
+    assert est.rise("t.py::e") == 600 * MIB
 
 
-def test_costs_charge_a_test_with_its_rise_and_the_fixtures_alive_around_it() -> None:
+def test_session_and_package_fixture_memory_is_the_workers_baseline() -> None:
+    c = Collector(make_info())
+    full_test(c, "t.py::a", 0.0)
+    full_test(c, "t.py::b", 1.0)  # paid session, package and module set-ups: 300 each
+    c.tests[-1].fixtures = {SESSION: 0.5, PACKAGE: 0.3, MODULE: 0.2}
+    c.tests[-1].memory = MemoryRecord(
+        base=100 * MIB, peak=1100 * MIB, after=1000 * MIB, coverage="self"
+    )
+    est = Estimates.from_run(c.finish(make_info().start + 2, termination="finished"))
+    assert est.retained == {MODULE: 300 * MIB}
+    assert est.rise("t.py::b") == 100 * MIB
+    # Even hand-written estimates never charge them, and they do not make families.
+    est = Estimates(
+        {"t.py::a": 1.0, "t.py::b": 1.0},
+        families={"t.py::a": frozenset({SESSION, PACKAGE})},
+        setups={SESSION: 0.0, PACKAGE: 0.0},
+        retained={SESSION: 4096 * MIB, PACKAGE: 1024 * MIB},
+    )
+    assert est.kept(SESSION) == 0 and est.kept(PACKAGE) == 0
+    costs = Costs(est, ["t.py::a", "t.py::b"])
+    assert not costs.retained and not costs.any_memory
+    assert costs.family[0] == frozenset()
+    assert costs.charge(0, set()).memory == 0
+
+
+def test_costs_charge_a_test_with_its_need_and_the_fixtures_alive_around_it() -> None:
     ids = ["t.py::a", "t.py::b", "u.py::c"]
     est = Estimates(
         dict.fromkeys(ids, 1.0),
-        families={"t.py::a": frozenset({SESSION}), "t.py::b": frozenset({SESSION})},
-        setups={SESSION: 0.0},  # too quick to matter for time, kept for its memory
+        families={"t.py::a": frozenset({MODULE}), "t.py::b": frozenset({MODULE})},
+        setups={MODULE: 0.0},  # too quick to matter for time, kept for its memory
         memory={"t.py::a": 50 * MIB, "u.py::c": 10 * MIB},
-        retained={SESSION: 300 * MIB},
+        retained={MODULE: 300 * MIB},
     )
     costs = Costs(est, ids, Declarations())
-    assert costs.family[0] == frozenset({SESSION}) and costs.any_memory
-    first = costs.charge(0, set())  # sets the fixture up: rise plus what it will keep
-    assert first.memory == 350 * MIB and SESSION in first.after
-    second = costs.charge(1, first.after)  # no rise of its own, but the fixture is alive
+    assert costs.family[0] == frozenset({MODULE}) and costs.any_memory
+    first = costs.charge(0, set())  # sets the fixture up: its need plus what it will keep
+    assert first.memory == 350 * MIB and MODULE in first.after
+    second = costs.charge(1, first.after)  # no need of its own, but the fixture is alive
     assert second.memory == 300 * MIB
-    third = costs.charge(2, first.after)  # session fixture stays alive across modules
-    assert third.memory == 310 * MIB
+    third = costs.charge(2, first.after)  # a module fixture is gone in another module
+    assert third.memory == 10 * MIB and MODULE not in third.after
     assert costs.kept_memory(first.after) == 300 * MIB
     assert not Costs(Estimates(dict.fromkeys(ids, 1.0)), ids).any_memory
 
@@ -121,6 +176,9 @@ def test_hungry_tests_take_turns_under_a_memory_budget_alone() -> None:
     peak = run_checking_memory(sched, nodes, {i: est.estimate(ids[i]) for i in range(6)})
     assert peak <= 1000 * MIB and peak >= 700 * MIB
     assert sched.waits, "one hungry test had to wait for the other"
+    assert all(w.gates == {"memory"} for w in sched.waits)  # and it was memory that held it
+    assert sched.memory_summary()["waited_tests"] == 1
+    assert sched.cpu_summary()["waited_tests"] == 0 and not sched.parked
     assert sched.now >= 4.0  # the hungry tests ran one after the other
 
 
@@ -148,15 +206,15 @@ def test_a_fixture_that_keeps_memory_counts_against_tests_on_other_workers() -> 
     ids = ["f1", "f2", "f3", "big"]
     est = Estimates(
         dict.fromkeys(ids, 1.0),
-        families={f: frozenset({SESSION}) for f in ("f1", "f2", "f3")},
-        setups={SESSION: 0.5},
+        families={f: frozenset({MODULE}) for f in ("f1", "f2", "f3")},
+        setups={MODULE: 0.5},
         memory={"big": 600 * MIB},
-        retained={SESSION: 500 * MIB},
+        retained={MODULE: 500 * MIB},
     )
     sched = memory_scheduler(est, ids, budget=1000 * MIB)
     nodes = start(sched, ids)
     mem = sched.memory_admissions["local"]
-    holder = next(n for n in nodes if SESSION in sched.lanes[n].fixtures)
+    holder = next(n for n in nodes if MODULE in sched.lanes[n].fixtures)
     other = next(n for n in nodes if n is not holder)
     assert mem.held(holder) >= 500 * MIB
     # ``big`` cannot run next to the fixture: it is parked, or waits, until the
@@ -165,6 +223,46 @@ def test_a_fixture_that_keeps_memory_counts_against_tests_on_other_workers() -> 
         other in sched.waiting
     )
     run_checking_memory(sched, nodes, dict.fromkeys(range(4), 1.0))
+    assert all(w.gates == {"memory"} for w in sched.waits) and not sched.parked
+
+
+@needs_xdist
+def test_a_parked_worker_that_never_runs_keeps_its_wait_in_the_summary() -> None:
+    ids = ["f1", "f2", "f3", "f4", "big"]
+    est = Estimates(
+        dict.fromkeys(ids, 1.0),
+        families={f: frozenset({MODULE}) for f in ids[:4]},
+        setups={MODULE: 0.5},
+        memory={"big": 600 * MIB},
+        retained={MODULE: 500 * MIB},
+    )
+    sched = memory_scheduler(est, ids, workers=3, budget=1000 * MIB)
+    nodes = start(sched, ids, workers=3)
+    # The fixture family is split over two lanes; ``big`` cannot start next to what
+    # they both keep, so the third worker sits parked with it, undispatched.
+    parked = [n for n in nodes if n in sched.waiting and not sched.node2pending[n]]
+    assert len(parked) == 1 and sched.refused[parked[0]] == {"memory"}
+    assert sched.lanes[parked[0]].plan == [ids.index("big")]
+    sched.now += 3.0
+    sched.remove_node(parked[0])  # gone without a test: nothing to put the wait on
+    assert [(w.index, w.seconds, w.gates) for w in sched.parked] == [
+        (-1, 3.0, frozenset({"memory"}))
+    ]
+    summary = sched.memory_summary()
+    assert summary["parked_workers"] == 1 and summary["parked"] == 3.0
+    assert summary["waited_tests"] == 0
+    assert sched.cpu_summary()["parked_workers"] == 0
+    assert parked[0] not in sched.waiting and parked[0] not in sched.refused
+
+
+def test_summary_lines_say_who_waited_and_who_sat_parked() -> None:
+    from pytest_timing.plugin import _waited
+
+    assert _waited({"waited_tests": 0, "parked_workers": 0}, "for memory") == ""
+    assert (
+        _waited({"waited_tests": 2, "waited": 1.5, "parked_workers": 1, "parked": 3}, "for memory")
+        == "; 2 tests waited 1.50s for memory; 1 worker sat 3.00s parked for memory"
+    )
 
 
 @needs_xdist
@@ -248,7 +346,13 @@ def test_the_second_run_keeps_hungry_tests_apart(pytester: pytest.Pytester, dist
     assert memory["domains"]["local"]["budget"] == 300 * MIB
     assert memory["domains"]["local"]["forced"] == 0
     assert memory["known_tests"] == 5 and memory["largest"] >= 190 * MIB
-    assert memory["waited_tests"] >= 1
+    assert memory["waited_tests"] >= 1 and memory["parked_workers"] == 0
+    # The wait is on the test that was held, marked as memory's, and the chart says so.
+    held = [t for t in doc["tests"] if t.get("memory", {}).get("wait")]
+    assert [t["nodeid"].split("::")[-1] for t in held] in (["test_hungry_a"], ["test_hungry_b"])
+    assert "wait" not in held[0].get("cpu", {})
+    assert sum(t["memory"]["wait"] for t in held) == pytest.approx(memory["waited"], abs=1e-3)
+    second.stdout.fnmatch_lines([f"*{held[0]['nodeid']}  waited * for memory"])
 
 
 @needs_xdist

@@ -176,6 +176,18 @@ def format_bytes(size: float) -> str:
     return f"{size:.1f} TiB"
 
 
+def _waited(summary: dict[str, Any], what: str) -> str:
+    """The waiting part of a gate's summary line: tests held back, workers parked."""
+    text = ""
+    if summary.get("waited_tests"):
+        n = summary["waited_tests"]
+        text += f"; {n} test{'s' if n != 1 else ''} waited {summary['waited']:.2f}s {what}"
+    if summary.get("parked_workers"):
+        n = summary["parked_workers"]
+        text += f"; {n} worker{'s' if n != 1 else ''} sat {summary['parked']:.2f}s parked {what}"
+    return text
+
+
 class Settings:
     """Resolve values by CLI, environment, then ini; enable timing if any source asks."""
 
@@ -573,9 +585,7 @@ class TimingPlugin:
             line += f", largest {format_bytes(summary['largest'])}"
         else:
             line += "; no recorded memory in the schedule history yet"
-        if summary["waited_tests"] and not (scheduler is not None and scheduler.admissions):
-            n = summary["waited_tests"]
-            line += f"; {n} test{'s' if n != 1 else ''} waited {summary['waited']:.2f}s for memory"
+        line += _waited(summary, "for memory")
         return line
 
     def _cpu_summary(self) -> str | None:
@@ -609,9 +619,7 @@ class TimingPlugin:
             return None  # no CPU budget: a memory budget alone has its own line
         line = "cpu: " + "; ".join(parts)
         line += f"; {heavy} test{'s' if heavy != 1 else ''} over one slot"
-        if summary["waited_tests"]:
-            n = summary["waited_tests"]
-            line += f"; {n} test{'s' if n != 1 else ''} waited {summary['waited']:.2f}s for slots"
+        line += _waited(summary, "for slots")
         if summary.get("cancelled"):
             n = summary["cancelled"]
             line += f"; {n} unadmitted test{'s' if n != 1 else ''} withdrawn at shutdown"
@@ -672,6 +680,7 @@ class TimingPlugin:
                     wait.index,
                     wait.attempt,
                     wait.seconds,
+                    wait.gates,
                 )
             self.collector.run.cpu = scheduler.cpu_summary()
             self.collector.run.memory = scheduler.memory_summary()

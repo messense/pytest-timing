@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
 
 - Memory admission no longer charges what session- and package-scoped fixtures keep
   resident. Every worker sets them up once and never lets go, so counting them once

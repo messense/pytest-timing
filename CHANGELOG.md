@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- The HTML report shows CPU and memory usage. The table gains "CPU time", "CPUs"
+  (the CPUs a test kept busy on average, beside the slots it declared) and "Memory"
+  (what it needed on top of its worker's footprint) columns, the hover details say
+  the same with what the measurement covered, the header totals the run and names
+  each host's budget, and two graphs show CPUs busy and resident memory over time,
+  estimated from the per-test records. All of it appears only where there was a
+  reading.
+
 ## 0.3.1
 
 - Memory admission no longer charges what session- and package-scoped fixtures keep

@@ -79,6 +79,43 @@ def test_report_shows_how_long_admission_held_a_test(sample_run: Run, tmp_path: 
 
 
 @needs_chrome
+def test_report_shows_cpu_and_memory_usage(sample_run: Run, tmp_path: Path) -> None:
+    from pytest_timing.model import CpuRecord, MemoryRecord
+
+    dom = _chrome_dom(sample_run, tmp_path)
+    assert "CPU time</th>" not in dom and "Memory</th>" not in dom  # nothing measured
+    assert '<div id="cpu-usage" hidden' in dom and '<div id="mem-usage" hidden' in dom
+
+    mib = 1024 * 1024
+    two = next(t for t in sample_run.tests if t.nodeid.endswith("test_two"))
+    two.cpu = CpuRecord(elapsed=2.0, work=3.0, demand=4, coverage="tree")
+    two.memory = MemoryRecord(base=100 * mib, peak=612 * mib, after=110 * mib, coverage="tree")
+    four = next(t for t in sample_run.tests if t.nodeid.endswith("test_four"))
+    four.cpu = CpuRecord(elapsed=four.duration, wait=0.5)  # held back, but nothing measured
+    sample_run.run.cpu = {
+        "gated": True,
+        "domains": {"local": {"budget": 4, "lowest": 4, "host": {"cpus": 8}}},
+        "waited": 0.5,
+        "waited_tests": 1,
+    }
+    dom = _chrome_dom(sample_run, tmp_path)
+    for heading in ("CPU time</th>", "CPUs</th>", "Memory</th>"):
+        assert heading in dom
+    assert '>3.00s</td><td class="num">1.50 <span class="muted">/ 4</span></td>' in dom
+    assert "100.0 MiB before, 612.0 MiB at peak, 110.0 MiB after (+10.0 MiB kept)" in dom
+    assert ">+512.0 MiB</td>" in dom
+    unmeasured = len(sample_run.tests) - 1
+    assert dom.count('<td class="num">-</td><td class="num">-</td><td class="num">-</td>') == (
+        unmeasured
+    )
+    assert "3.00s of CPU time, 1.00 CPUs busy on average, up to 1.50" in dom
+    assert "8 cpus, budget 4 slots; 1 test waited 500.0ms for slots" in dom
+    assert "up to 612.0 MiB resident across workers" in dom
+    assert '<div id="cpu-usage">' in dom and '<div id="mem-usage">' in dom
+    assert 'id="cpu-container"><svg' in dom and 'id="mem-container"><svg' in dom
+
+
+@needs_chrome
 def test_large_report_executes_in_a_browser(tmp_path: Path) -> None:
     """150k tests on one lane: no argument-limit errors, merged bars, capped table."""
     c = Collector(make_info())

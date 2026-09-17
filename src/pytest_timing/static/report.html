@@ -30,6 +30,8 @@
   --canvas-collecting: #3a7bd5;
   --canvas-rate: rgba(250, 119, 0, 0.12);
   --canvas-rate-line: #fa7700;
+  --canvas-usage: #2a78d6;
+  --canvas-usage-fill: rgba(42, 120, 214, 0.14);
   --canvas-hl: #000;
   --tooltip-bg: #fffbe6;
   --tooltip-border: #c9b76a;
@@ -60,6 +62,8 @@
     --canvas-collecting: #6fa4ff;
     --canvas-rate: rgba(250, 119, 0, 0.16);
     --canvas-rate-line: #ff9a3c;
+    --canvas-usage: #3987e5;
+    --canvas-usage-fill: rgba(57, 135, 229, 0.2);
     --canvas-hl: #fff;
     --tooltip-bg: #2a2d33;
     --tooltip-border: #5a5f68;
@@ -74,6 +78,7 @@ body {
 h1 { font-size: 22px; margin: 0 0 12px; }
 h2 { font-size: 16px; margin: 28px 0 8px; }
 .muted { color: var(--muted); }
+h2 .note { font-weight: 400; font-size: 13px; margin-left: 6px; }
 code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
 table.summary { border-collapse: collapse; margin-bottom: 8px; }
 table.summary td { padding: 3px 12px 3px 0; vertical-align: top; }
@@ -119,6 +124,7 @@ rect.ph-call { fill: var(--canvas-base); }
 .lbl { fill: var(--canvas-text); }
 .down-mark { stroke: var(--canvas-axes); stroke-width: 1.5; }
 .down-err { stroke: var(--canvas-bad); stroke-width: 2; }
+.cross { stroke: var(--canvas-axes); stroke-dasharray: 3 3; pointer-events: none; }
 #tooltip {
   position: fixed; z-index: 10; pointer-events: none; display: none;
   max-width: 560px; padding: 8px 10px; font-size: 12px; line-height: 1.35;
@@ -173,6 +179,15 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
   <span><i style="background:var(--canvas-rate)"></i>Tests completed / s</span>
 </div>
 
+<div id="cpu-usage" hidden>
+<h2>CPU usage <span class="muted note">CPUs kept busy by the running tests, each spread evenly over its run</span></h2>
+<div class="chart-wrap" id="cpu-container"></div>
+</div>
+<div id="mem-usage" hidden>
+<h2>Memory usage <span class="muted note">resident memory of the workers' process trees, each running test at its peak</span></h2>
+<div class="chart-wrap" id="mem-container"></div>
+</div>
+
 <h2>Tests <span class="muted" id="table-note"></span></h2>
 <div style="overflow-x:auto"><table class="tests" id="tests-table"><thead></thead><tbody></tbody></table></div>
 
@@ -213,7 +228,29 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
     t.cpuWait = (t.cpu && t.cpu.wait) || 0;
     t.memWait = (t.memory && t.memory.wait) || 0;
     t.waited = t.cpuWait + t.memWait;
+    // Measured usage: CPU seconds and the CPUs they kept busy on average; resident
+    // memory needed on top of what the worker already held. null = no reading.
+    var c = t.cpu, m = t.memory;
+    t.cpuWork = c && c.coverage !== 'none' ? c.work : null;
+    t.cpuRate = t.cpuWork != null && c.elapsed > 0 ? c.work / c.elapsed : null;
+    t.memRise = m && m.peak > 0 ? Math.max(0, m.peak - m.base) : null;
   });
+  var ANY_CPU = TESTS.some(function (t) { return t.cpuWork != null; });
+  var ANY_MEM = TESTS.some(function (t) { return t.memRise != null; });
+  var COVERAGE = { tree: 'worker and its subprocesses', reaped: 'worker and finished subprocesses', self: 'worker only' };
+  function cpuText(t) {
+    var c = t.cpu, s = fmt(t.cpuWork) + ' of CPU time';
+    if (t.cpuRate != null) s += ', ' + t.cpuRate.toFixed(2) + ' CPUs busy on average';
+    if (c.demand > 1) s += ', ' + c.demand + ' slots declared';
+    if (c.pressure != null) s += ', host CPU pressure ' + Math.round(c.pressure * 100) + '%';
+    if (c.throttled) s += ', throttled by a cgroup quota';
+    return s + ' (' + (COVERAGE[c.coverage] || c.coverage) + ')';
+  }
+  function memText(t) {
+    var m = t.memory, kept = Math.max(0, m.after - m.base);
+    return 'needed +' + fmtBytes(t.memRise) + ': ' + fmtBytes(m.base) + ' before, ' + fmtBytes(m.peak) + ' at peak, ' + fmtBytes(m.after) + ' after' +
+      (kept ? ' (+' + fmtBytes(kept) + ' kept)' : '') + ' (' + (COVERAGE[m.coverage] || m.coverage) + ')';
+  }
   var ANY_WAITED = TESTS.some(function (t) { return t.waited > 0; });
   function heldText(t) {
     var parts = [];
@@ -232,12 +269,33 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
   var SUMMARY = DATA.summary || { wall: 0, busy: 0, utilisation: 0, lanes: [] };
   function events(intervals) {
     var ev = [];
-    intervals.forEach(function (iv) { ev.push([iv[0], 1]); ev.push([iv[1], -1]); });
+    intervals.forEach(function (iv) { var n = iv.length > 2 ? iv[2] : 1; ev.push([iv[0], n]); ev.push([iv[1], -n]); });
     return ev.sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
   }
   var ACTIVE_EVENTS = events(TESTS.map(function (t) { return [t.start, t.stop]; }));
   var BOOT_EVENTS = events(WORKERS.filter(function (w) { return w.ready != null && w.start != null && w.ready > w.start; }).map(function (w) { return [w.start, w.ready]; }));
   var COLLECT_EVENTS = events(WORKERS.filter(function (w) { return w.ready != null && w.collected != null && w.collected > w.ready; }).map(function (w) { return [w.ready, w.collected]; }));
+  // Usage over time, from the per-test records: a test's CPU work is spread evenly over
+  // its span; a lane holds its running test's peak, and between tests what the last left.
+  var CPU_EVENTS = events(TESTS.filter(function (t) { return t.cpuRate; }).map(function (t) { return [t.start, t.stop, t.cpuRate]; }));
+  var MEM_EVENTS = (function () {
+    var last = {}, ivs = [];
+    TESTS_BY_START.forEach(function (t) {
+      var prev = last[t.worker];
+      if (prev && t.start > prev.stop) ivs.push([prev.stop, t.start, prev.memory.after]);
+      delete last[t.worker];
+      if (t.memRise == null) return;
+      ivs.push([t.start, t.stop, t.memory.peak]);
+      last[t.worker] = t;
+    });
+    Object.keys(last).forEach(function (id) {
+      var t = last[id], w = workerById[id], end = w && w.down != null ? w.down : null;
+      if (end != null && end > t.stop) ivs.push([t.stop, end, t.memory.after]);
+    });
+    return events(ivs);
+  })();
+  function peakOf(ev) { var cur = 0, peak = 0; ev.forEach(function (e) { cur += e[1]; if (cur > peak) peak = cur; }); return peak; }
+  var CPU_PEAK = peakOf(CPU_EVENTS), MEM_PEAK = peakOf(MEM_EVENTS);
   var WALL = Math.max(0, (RUN.stop || 0) - (RUN.start || 0));
   WORKERS.forEach(function (w) { ['ready', 'collected', 'down'].forEach(function (k) { if (w[k] != null) WALL = Math.max(WALL, w[k]); }); });
   TESTS.forEach(function (t) { WALL = Math.max(WALL, t.stop); });
@@ -255,6 +313,12 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
     if (s >= 1) return s.toFixed(2) + 's';
     if (s >= 0.001) return (s * 1000).toFixed(1) + 'ms';
     return (s * 1e6).toFixed(0) + 'µs';
+  }
+  function fmtBytes(n) {
+    if (n == null || isNaN(n)) return '-';
+    var units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'], i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return n.toFixed(i ? 1 : 0) + ' ' + units[i];
   }
   function pct(part, total) { return total > 0 ? ' (' + Math.round(part / total * 100) + '%)' : ''; }
   function fmtDate(epoch) { try { return new Date(epoch * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z'); } catch (e) { return '-'; } }
@@ -413,23 +477,65 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
       '<span class="muted">hover for details, click to pin a module</span>';
   }
 
+  // Event sweep sampled per pixel column over a pre-sorted event list.
+  function sample(ev, cols, pxPerSec) {
+    var res = new Array(cols), cur = 0, k = 0, peak = 0;
+    for (var col = 0; col < cols; col++) {
+      var t = (col + 1) / pxPerSec, mx = cur;
+      while (k < ev.length && ev[k][0] <= t) { cur += ev[k][1]; if (cur > mx) mx = cur; k++; }
+      res[col] = mx; if (mx > peak) peak = mx;
+    }
+    return { v: res, peak: peak };
+  }
+  // Step line through a sampled series, scaled so `peak` reaches the top of the plot.
+  function stepPath(series, peak, x0, plotH) {
+    var d = '', prev = -1, cols = series.v.length;
+    for (var col = 0; col < cols; col++) {
+      var v = series.v[col], y = TOP_PAD + plotH - v / peak * plotH, x = x0 + col;
+      if (col === 0) d += 'M' + x + ' ' + y.toFixed(1);
+      else if (v !== prev) d += ' L' + x + ' ' + (TOP_PAD + plotH - prev / peak * plotH).toFixed(1) + ' L' + x + ' ' + y.toFixed(1);
+      prev = v;
+    }
+    return d + ' L' + (x0 + cols) + ' ' + (TOP_PAD + plotH - prev / peak * plotH).toFixed(1);
+  }
+
+  // One usage series over time: a step line over a soft fill, with its own y axis.
+  var usageCharts = {};
+  function usageChart(id, ev, bytes) {
+    var pxPerSec = state.pxPerSec, H = 160, plotH = H - TOP_PAD - BOTTOM_PAD;
+    var x0 = LEFT_PAD + textWidth('0000.0 MiB') + 8, cols = Math.max(1, Math.ceil(WALL * pxPerSec));
+    var series = sample(ev, cols, pxPerSec);
+    // Ticks at 1/2/5 steps of the unit the peak is read in (binary units for bytes).
+    var unit = 1; while (bytes && series.peak / unit >= 1024) unit *= 1024;
+    var raw = (series.peak / unit || 1) / 4, mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10)), f = raw / mag;
+    var step = (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * mag * unit, top = step * Math.max(1, Math.ceil(series.peak / step - 1e-9));
+    var svg = ['<svg width="' + (x0 + cols + RIGHT_PAD) + '" height="' + H + '">', axisSvg(x0, cols, H, pxPerSec)];
+    for (var yv = 0; yv <= top + step / 2; yv += step) {
+      var yy = (TOP_PAD + plotH - yv / top * plotH).toFixed(1);
+      svg.push('<line class="grid" x1="' + x0 + '" y1="' + yy + '" x2="' + (x0 + cols) + '" y2="' + yy + '"/>');
+      svg.push('<text class="lbl" x="' + (x0 - 4) + '" y="' + (+yy + 4) + '" text-anchor="end">' + (bytes ? fmtBytes(yv) : +yv.toFixed(2)) + '</text>');
+    }
+    var d = stepPath(series, top, x0, plotH), floor = TOP_PAD + plotH;
+    svg.push('<path d="' + d + ' L' + (x0 + cols) + ' ' + floor + ' L' + x0 + ' ' + floor + ' Z" fill="var(--canvas-usage-fill)"/>');
+    svg.push('<path d="' + d + '" fill="none" stroke="var(--canvas-usage)" stroke-width="2"/>');
+    svg.push('<line class="cross" y1="' + TOP_PAD + '" y2="' + floor + '" visibility="hidden"/></svg>');
+    document.getElementById(id).innerHTML = svg.join('');
+    usageCharts[id] = { x0: x0, pxPerSec: pxPerSec, v: series.v, bytes: bytes };
+  }
+  function renderUsage() {
+    document.getElementById('cpu-usage').hidden = !CPU_PEAK;
+    document.getElementById('mem-usage').hidden = !MEM_PEAK;
+    if (CPU_PEAK) usageChart('cpu-container', CPU_EVENTS, false);
+    if (MEM_PEAK) usageChart('mem-container', MEM_EVENTS, true);
+  }
+
   function renderConcurrency() {
     var c = document.getElementById('timing-container');
     if (!TESTS.length && !WORKERS.length) { c.innerHTML = '<div class="empty">No data.</div>'; return; }
     var pxPerSec = state.pxPerSec, H = 220, plotH = H - TOP_PAD - BOTTOM_PAD;
     var labelW = textWidth('000') + 8, x0 = LEFT_PAD + labelW, width = Math.ceil(WALL * pxPerSec);
     var cols = Math.max(1, width);
-    // Event sweep sampled per pixel column over a pre-sorted event list.
-    function sample(ev) {
-      var res = new Array(cols), cur = 0, k = 0, peak = 0;
-      for (var col = 0; col < cols; col++) {
-        var t = (col + 1) / pxPerSec, mx = cur;
-        while (k < ev.length && ev[k][0] <= t) { cur += ev[k][1]; if (cur > mx) mx = cur; k++; }
-        res[col] = mx; if (mx > peak) peak = mx;
-      }
-      return { v: res, peak: peak };
-    }
-    var active = sample(ACTIVE_EVENTS), booting = sample(BOOT_EVENTS), collecting = sample(COLLECT_EVENTS);
+    var active = sample(ACTIVE_EVENTS, cols, pxPerSec), booting = sample(BOOT_EVENTS, cols, pxPerSec), collecting = sample(COLLECT_EVENTS, cols, pxPerSec);
     var peak = Math.max(1, active.peak, booting.peak, collecting.peak, laneIds.length);
     // Tests completed per second: buckets follow the scale, at least 8px wide.
     var bucket = niceStep(pxPerSec, 8), nb = Math.ceil(WALL / bucket) + 1, rate = new Array(nb), ratePeak = 0;
@@ -459,16 +565,7 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
       svg.push('<path d="' + area + '" fill="var(--canvas-rate)" stroke="var(--canvas-rate-line)" stroke-width="0.75" stroke-opacity="0.6"/>');
     }
     function line(series, color) {
-      if (!series.peak) return '';
-      var d = '', prev = -1;
-      for (var col = 0; col < cols; col++) {
-        var v = series.v[col], y = TOP_PAD + plotH - v / peak * plotH, x = x0 + col;
-        if (col === 0) d += 'M' + x + ' ' + y.toFixed(1);
-        else if (v !== prev) d += ' L' + x + ' ' + (TOP_PAD + plotH - prev / peak * plotH).toFixed(1) + ' L' + x + ' ' + y.toFixed(1);
-        prev = v;
-      }
-      d += ' L' + (x0 + cols) + ' ' + (TOP_PAD + plotH - prev / peak * plotH).toFixed(1);
-      return '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="1.5"/>';
+      return series.peak ? '<path d="' + stepPath(series, peak, x0, plotH) + '" fill="none" stroke="' + color + '" stroke-width="1.5"/>' : '';
     }
     svg.push(line(booting, 'var(--canvas-booting)'));
     svg.push(line(collecting, 'var(--canvas-collecting)'));
@@ -481,11 +578,13 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
     ['idx', '#'], ['nodeid', 'Test'], ['worker', 'Worker'], ['dur', 'Total'],
     ['setup', 'Setup'], ['call', 'Call'], ['teardown', 'Teardown'], ['outcome', 'Outcome'], ['start', 'Start']
   ];
+  if (ANY_CPU) COLS.push(['cpuWork', 'CPU time'], ['cpuRate', 'CPUs']);
+  if (ANY_MEM) COLS.push(['memRise', 'Memory']);
   if (ANY_WAITED) COLS.push(['waited', 'Held']);
   function sortVal(t, key) {
     if (key === 'idx') return t.i;
     if (PHASES.indexOf(key) >= 0) return t.ph[key] ? t.ph[key].dur : 0;
-    return t[key];
+    return t[key] == null ? -1 : t[key];
   }
   function renderTable() {
     var tests = filteredTests(), key = state.sortKey, dir = state.sortDir;
@@ -498,6 +597,8 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
         '<td class="num">' + fmt(t.dur) + '</td>' +
         PHASES.map(function (p) { var ph = t.ph[p]; return '<td class="num">' + (ph ? fmt(ph.dur) + pct(ph.dur, t.dur) : '-') + '</td>'; }).join('') +
         '<td class="o-' + t.outcome + '">' + esc(t.outcome) + '</td><td class="num">' + fmt(t.start) + '</td>' +
+        (ANY_CPU ? '<td class="num"' + (t.cpuWork != null ? ' title="' + esc(cpuText(t)) + '">' + fmt(t.cpuWork) : '>-') + '</td><td class="num">' + (t.cpuRate != null ? t.cpuRate.toFixed(2) + (t.cpu.demand > 1 ? ' <span class="muted">/ ' + t.cpu.demand + '</span>' : '') : '-') + '</td>' : '') +
+        (ANY_MEM ? '<td class="num"' + (t.memRise != null ? ' title="' + esc(memText(t)) + '">' + (t.memRise ? '+' : '') + fmtBytes(t.memRise) : '>-') + '</td>' : '') +
         (ANY_WAITED ? '<td class="num" title="' + esc(heldText(t)) + '">' + (t.waited ? fmt(t.waited) : '-') + '</td>' : '') + '</tr>');
     });
     document.querySelector('#tests-table tbody').innerHTML = rows.join('') || '<tr><td colspan="' + COLS.length + '" class="empty">No tests match the current filters.</td></tr>';
@@ -524,6 +625,30 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
     row('Tests:', TESTS.length + OUTCOMES.filter(function (o) { return counts[o]; }).map(function (o) { return ', ' + counts[o] + ' ' + o; }).join(''));
     row('Busy time:', fmt(busy) + (avail > 0 ? ' of ' + fmt(avail) + ' available (' + Math.round(busy / avail * 100) + '% utilisation)' : ''));
     if (longest && laneIds.length > 1) row('Critical lane:', esc(longest.id) + ', last test finished at ' + fmt(longest.last));
+    // A gate's budget per host, and how long tests waited at it (RunInfo.cpu / RunInfo.memory).
+    function gateText(info, what, describe) {
+      var names = Object.keys((info && info.domains) || {}), parts = [];
+      names.forEach(function (name) { var d = describe(info.domains[name]); if (d) parts.push((names.length > 1 ? esc(name) + ': ' : '') + d); });
+      if (info && info.waited_tests) parts.push(info.waited_tests + ' test' + (info.waited_tests !== 1 ? 's' : '') + ' waited ' + fmt(info.waited) + ' for ' + what);
+      return parts.length ? '<br><span class="muted">' + parts.join('; ') + '</span>' : '';
+    }
+    if (ANY_CPU) {
+      var work = 0; TESTS.forEach(function (t) { work += t.cpuWork || 0; });
+      row('CPU:', fmt(work) + ' of CPU time, ' + (work / WALL).toFixed(2) + ' CPUs busy on average, up to ' + CPU_PEAK.toFixed(2) +
+        gateText(RUN.cpu, 'slots', function (d) {
+          var host = d.host || {}, out = [];
+          if (host.cpus) out.push(host.cpus + ' cpus');
+          if (d.budget != null) out.push('budget ' + d.budget + ' slot' + (d.budget !== 1 ? 's' : '') + (d.lowest < d.budget ? ', lowered to ' + d.lowest + ' under pressure' : ''));
+          return out.join(', ');
+        }));
+    }
+    if (ANY_MEM) {
+      var big = null; TESTS.forEach(function (t) { if (t.memRise != null && (!big || t.memRise > big.memRise)) big = t; });
+      row('Memory:', 'up to ' + fmtBytes(MEM_PEAK) + ' resident across workers; the hungriest test needed +' + fmtBytes(big.memRise) + ' <code>' + esc(big.nodeid) + '</code>' +
+        gateText(RUN.memory, 'memory', function (d) {
+          return d.budget != null ? 'budget ' + fmtBytes(d.budget) + (d.host ? ' of ' + fmtBytes(d.host) : '') : '';
+        }));
+    }
     var collect = WORKERS.filter(function (w) { return w.ready != null && w.collected != null; });
     if (collect.length) {
       var cmax = maxOf(collect, function (w) { return w.collected - w.ready; });
@@ -541,7 +666,8 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
   }
   function tipForTest(t) {
     return '<b>' + esc(t.nodeid) + '</b><br>' + esc(t.outcome) + ' on ' + esc(t.worker) + (t.attempt ? ' (attempt ' + (t.attempt + 1) + ')' : '') +
-      '<br>total ' + fmt(t.dur) + ', started at ' + fmt(t.start) + (t.waited ? '<br>held ' + esc(heldText(t)) : '') + phaseRows(t);
+      '<br>total ' + fmt(t.dur) + ', started at ' + fmt(t.start) + (t.waited ? '<br>held ' + esc(heldText(t)) : '') +
+      (t.cpuWork != null ? '<br>cpu: ' + esc(cpuText(t)) : '') + (t.memRise != null ? '<br>memory: ' + esc(memText(t)) : '') + phaseRows(t);
   }
   function tipForCluster(c) {
     var top = c.tests.slice().sort(function (a, b) { return b.dur - a.dur; }).slice(0, 10);
@@ -569,6 +695,23 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
     var m = +g.dataset.m;
     state.pinned = state.pinned === m ? null : m;
     applyPin();
+  });
+  ['cpu-container', 'mem-container'].forEach(function (id) {
+    var el = document.getElementById(id);
+    el.addEventListener('mousemove', function (ev) {
+      var ch = usageCharts[id], svg = el.querySelector('svg'), cross = el.querySelector('.cross');
+      if (!ch || !svg) return;
+      var col = Math.floor(ev.clientX - svg.getBoundingClientRect().left - ch.x0);
+      if (col < 0 || col >= ch.v.length) { tip.style.display = 'none'; cross.setAttribute('visibility', 'hidden'); return; }
+      cross.setAttribute('x1', ch.x0 + col + 0.5); cross.setAttribute('x2', ch.x0 + col + 0.5); cross.setAttribute('visibility', 'visible');
+      tip.innerHTML = '<b>' + (ch.bytes ? fmtBytes(ch.v[col]) : ch.v[col].toFixed(2) + ' CPUs') + '</b> at ' + fmt(col / ch.pxPerSec);
+      tip.style.display = 'block';
+      tip.style.left = Math.min(ev.clientX + 14, window.innerWidth - tip.offsetWidth - 8) + 'px'; tip.style.top = (ev.clientY + 14) + 'px';
+    });
+    el.addEventListener('mouseleave', function () {
+      tip.style.display = 'none';
+      var cross = el.querySelector('.cross'); if (cross) cross.setAttribute('visibility', 'hidden');
+    });
   });
   function applyPin() {
     var bars = pc.querySelectorAll('.bar');
@@ -602,7 +745,7 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
   var scaleTimer = null;
   scaleInput.addEventListener('input', function () {
     state.pxPerSec = scaleFromSlider(+scaleInput.value); showScale();
-    clearTimeout(scaleTimer); scaleTimer = setTimeout(function () { renderPipeline(); renderConcurrency(); }, 40);
+    clearTimeout(scaleTimer); scaleTimer = setTimeout(function () { renderPipeline(); renderConcurrency(); renderUsage(); }, 40);
   });
 
   document.getElementById('view-lane').addEventListener('click', function () { setView('lane'); });
@@ -640,6 +783,7 @@ button.on { background: var(--link); color: #fff; border-color: var(--link); }
   renderSummary();
   renderPipeline();
   renderConcurrency();
+  renderUsage();
   renderTable();
   } catch (e) {
     // Surface failures in the document so automated checks can see them.

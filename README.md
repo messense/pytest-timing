@@ -112,7 +112,13 @@ lifecycles, detected host CPU environments, and how the session ended (`finished
 the input to the CLI below and to `--timing-schedule`.
 
 **HTML** is a single file with no external dependencies, so it can be attached to a CI
-job as an artifact and opened anywhere.
+job as an artifact and opened anywhere. Where CPU and memory were measured it shows
+them: each test's CPU time, the CPUs it kept busy on average (beside the slots it
+declared) and the memory it needed on top of its worker's footprint, in the table and
+the hover details; the run's totals and budgets in the header; and CPU and memory
+usage over time. The two graphs are drawn from the per-test records, not sampled: a
+test's CPU time is spread evenly over its run, and a worker counts at its running
+test's peak, so they show where the load was rather than its exact shape.
 
 **Trace** is a Chrome Trace Event file. Open it in
 [Perfetto UI](https://ui.perfetto.dev) with "Open trace file", or in `chrome://tracing`.

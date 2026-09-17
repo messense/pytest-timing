@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.2
 
 - The HTML report shows CPU and memory usage. The table gains "CPU time", "CPUs"
   (the CPUs a test kept busy on average, beside the slots it declared) and "Memory"

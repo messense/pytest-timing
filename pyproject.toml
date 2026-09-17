@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pytest-timing"
-version = "0.3.1"
+version = "0.3.2"
 description = "Record test timings under pytest-xdist and render cargo-style timing reports (ASCII Gantt and HTML)."
 readme = "README.md"
 license = "MIT"

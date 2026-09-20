@@ -70,9 +70,8 @@ def test_scope_grouping_does_not_replace_cheaper_parameter_locality() -> None:
 
 
 @needs_xdist
-@pytest.mark.parametrize("workers", [1, 2])
 def test_recorded_overlapping_module_fixtures_are_not_repeated(
-    pytester: pytest.Pytester, workers: int
+    pytester: pytest.Pytester,
 ) -> None:
     from conftest import run_timing
 
@@ -100,17 +99,12 @@ def test_recorded_overlapping_module_fixtures_are_not_repeated(
     history.write_text((pytester.path / "pytest-timing.json").read_text())
     for path in pytester.path.glob("*.setups"):
         path.unlink()
-    run_timing(
-        pytester, f"-n{workers}", "--timing-schedule", str(history), timeout=15
-    ).assert_outcomes(passed=8)
-    # Preserve worker assignments: each assigned worker/module needs one setup,
-    # even when measured durations make the planner split a module over workers.
-    assigned = {
-        (t["worker"], t["nodeid"].split("::")[0]) for t in load_json(pytester.path)["tests"]
-    }
-    assert sum(
-        len(path.read_text().splitlines()) for path in pytester.path.glob("*.setups")
-    ) == len(assigned)
+    # A single worker isolates ordering from balancing and runtime transfers,
+    # which may legitimately split a module or revisit it on the same worker.
+    run_timing(pytester, "-n1", "--timing-schedule", str(history), timeout=15).assert_outcomes(
+        passed=8
+    )
+    assert sum(len(path.read_text().splitlines()) for path in pytester.path.glob("*.setups")) == 4
 
 
 def _run_with(*tests: tuple[str, float, str]) -> Any:
@@ -488,6 +482,48 @@ def test_worker_that_runs_dry_takes_from_another_plan() -> None:
     sched.now = 6.0
     sched.mark_test_complete(gw0, ids.index("a"))
     assert gw0.shutting_down
+
+
+@needs_xdist
+def test_tail_transfer_charges_for_reentered_module() -> None:
+    ids = [f"m{m}.py::test_{name}" for m in range(4) for name in ("a", "b")]
+    families, setups = {}, {}
+    for m, db_seconds, cheap_seconds in (
+        (0, 0.120, 0.005),
+        (1, 0.117, 0.006),
+        (2, 0.129, 0.010),
+        (3, 0.100, 0.003),
+    ):
+        db = f"module:m{m}.py:conftest::db[]"
+        cheap = f"module:m{m}.py:conftest::cheap[]"
+        setups.update({db: db_seconds, cheap: cheap_seconds})
+        families[ids[2 * m]] = frozenset({db})
+        families[ids[2 * m + 1]] = frozenset({db, cheap})
+    sched = make_scheduler(
+        Estimates(
+            dict(zip(ids, (0.042, 0.006, 0.102, 0.029, 0.050, 0.015, 0.041, 0.016), strict=True)),
+            families=families,
+            setups=setups,
+        )
+    )
+    gw0, gw1 = start(sched, ids)
+    assert gw0.queued + sched.lanes[gw0].plan == [2, 6, 7, 5]
+    assert gw1.queued + sched.lanes[gw1].plan == [4, 0, 1, 3]
+
+    # gw1 leaves m2, then takes m2::test_b from gw0's tail. The extra setup
+    # still improves the predicted finish (0.814 -> 0.806 seconds).
+    for now, node, index in ((0.205, gw1, 4), (0.290, gw0, 2), (0.471, gw1, 0)):
+        sched.now = now
+        sched.mark_test_complete(node, index)
+    assert sched.lanes[gw0].plan == [5]
+    sched.now = 0.500
+    sched.mark_test_complete(gw1, 1)
+    assert gw1.queued == [4, 0, 1, 3, 5]
+    assert sched.lanes[gw0].plan == []
+    charge = sched.dispatched[gw1][5]
+    assert charge.seconds == pytest.approx(0.015 + 0.129 + 0.010)
+    assert charge.work == pytest.approx(charge.seconds)
+    assert sorted(gw0.queued + gw1.queued) == list(range(8))
 
 
 @needs_xdist

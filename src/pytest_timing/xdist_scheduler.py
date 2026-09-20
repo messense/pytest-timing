@@ -78,6 +78,7 @@ class AdmissionWait:
     attempt: int
     seconds: float
     gates: frozenset[str] = frozenset()  # the gate kinds that refused: cpu, memory
+    ended: float | None = None  # controller epoch, for placement on the report timeline
 
     def held_by(self, kind: str) -> bool:
         return kind in self.gates or not self.gates
@@ -119,6 +120,7 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
         self.lanes: dict[WorkerController, Lane] = {}
         self.dispatched: dict[WorkerController, dict[int, Charge]] = {}
         self.clock = time.monotonic
+        self.epoch_clock = time.time
         self.budget = 0.0
         self.known = 0  # collected tests with a recorded duration, once scheduled
         # Work stealing: one request in flight at a time, and who is waiting for work.
@@ -667,7 +669,14 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
                 index = request.index if request is not None else queue[0]
                 attempt = request.attempt if request is not None else 0
                 self.waits.append(
-                    AdmissionWait(xdist_compat.node_id(node), index, attempt, waited, gates)
+                    AdmissionWait(
+                        xdist_compat.node_id(node),
+                        index,
+                        attempt,
+                        waited,
+                        gates,
+                        self.epoch_clock(),
+                    )
                 )
 
     def _reserve(self, node: WorkerController) -> None:
@@ -862,38 +871,60 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
         if node in self.node2pending and node not in self.finished:
             self.live_holds[node] = holds
 
-    def _request_need(self, node: WorkerController, index: int, setup: int, hold: int) -> int:
-        """Cover both setup next to live holds and execution next to the new hold."""
-        queue = self.node2pending[node]
-        granted = list(queue) if xdist_compat.shutdown_was_sent(node) else queue[:-1]
-        if index not in granted:
-            granted.append(index)
-        return max(self._need(node, granted) + hold, setup + self._holds(node))
-
-    def _request_memory(self, node: WorkerController, index: int, key: str) -> int:
-        """Execution next to the fixture's recorded memory, once it is alive."""
+    def _request_charges(
+        self, node: WorkerController, request: FixtureRequest
+    ) -> dict[int, Charge]:
+        """Preview the same resource reconciliation that a successful grant commits."""
         assert self.costs is not None
-        queue = self.node2pending[node]
-        granted = list(queue) if xdist_compat.shutdown_was_sent(node) else queue[:-1]
-        if index not in granted:
-            granted.append(index)
-        return self._need_memory(node, granted) + self.costs.retained.get(key, 0)
+        demand = dict(self.dispatched[node])
+        if request.cancelled:
+            return demand
+        shared = key_scope(request.key) != "function"
+        kept = self.costs.retained.get(request.key, 0) if shared else 0
+        live = self._holds(node)
+        for index, charge in demand.items():
+            current = index == request.index
+            if current or shared:
+                demand[index] = charge.adding_fixture(
+                    request.key,
+                    request.setup if current else 0,
+                    request.hold,
+                    live if current else 0,
+                    kept,
+                )
+        return demand
 
     def _request_needs(
         self, node: WorkerController, request: FixtureRequest
     ) -> list[tuple[Admission, int]]:
+        charges = self._request_charges(node, request)
+        queue = self.node2pending[node]
+        granted = list(queue) if xdist_compat.shutdown_was_sent(node) else queue[:-1]
+        if request.index not in granted:
+            granted.append(request.index)
+        withdrawn = self.cancelled.get(node, set())
+        granted = [i for i in granted if i not in withdrawn]
         needs = []
         admission = self._admission(node)
         if admission is not None:
+            live = self._holds(node)
             needs.append(
                 (
                     admission,
-                    self._request_need(node, request.index, request.setup, request.hold),
+                    max(
+                        request.setup + live,
+                        max((charges[i].with_live_holds(live) for i in granted), default=live),
+                    ),
                 )
             )
         memory = self._memory_admission(node)
         if memory is not None:
-            needs.append((memory, self._request_memory(node, request.index, request.key)))
+            needs.append(
+                (
+                    memory,
+                    max((charges[i].memory for i in granted), default=self._need_memory(node, [])),
+                )
+            )
         return needs
 
     def _retry_request(self, node: WorkerController) -> bool:
@@ -908,29 +939,23 @@ class DurationScheduling(LoadScheduling):  # type: ignore[misc]  # xdist ships n
         self._admitted(node)  # retain its execution identity until the wait is recorded
         self.requests.pop(node)
         if not request.cancelled:
-            self._learn(node, request.index, request.key, request.setup, request.hold)
+            self._learn(node, request)
         xdist_compat.grant_slots(node, request.key, request.request_id)
 
-    def _learn(self, node: WorkerController, index: int, key: str, setup: int, hold: int) -> None:
-        """The fixture behind ``key`` is being set up on ``node`` for test ``index``:
-        project its cost onto the queued work. Actual holds change only after the
-        worker reports successful setup, not when a permit is issued."""
+    def _learn(self, node: WorkerController, request: FixtureRequest) -> None:
+        """Commit the granted fixture's resource needs onto the queued work.
+
+        Actual holds change only after the worker reports successful setup,
+        not when a permit is issued."""
         assert self.costs is not None
         lane = self.lanes[node]
-        holds = self._holds(node)  # alive already, without it
-        demand = self.dispatched[node]
+        key = request.key
+        self.dispatched[node].update(self._request_charges(node, request))
         if key_scope(key) == "function":
             # Its hold dies at this test's teardown. It is never a warm shared
             # instance, and must not increase any later test's reservation.
-            demand[index] = demand[index].adding_fixture(setup, hold, holds)
             return
-        self.costs.learn(key, setup, hold)
-        kept = self.costs.retained.get(key, 0)
-        for other in demand:
-            charge = demand[other].adding_fixture(0, hold, 0)
-            demand[other] = replace(charge, memory=charge.memory + kept)
-        current = demand[index]
-        demand[index] = replace(current, peak=max(current.peak, setup + holds))
+        self.costs.learn(key, request.setup, request.hold)
         queue = self.node2pending[node]
         if queue and key in self.costs.kept(queue[-1], {key}):
             pay(lane.fixtures, frozenset({key}))

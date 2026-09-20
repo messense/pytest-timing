@@ -1,18 +1,106 @@
-"""``pytest-timing`` command line: re-render or merge saved JSON runs."""
+"""``pytest-timing`` command line: render, merge or compare saved JSON runs."""
 
 from __future__ import annotations
 
 import argparse
+import json
+import math
 import sys
 from pathlib import Path
+from typing import Any
 
+from pytest_timing.compare import compare_runs, format_comparison, parse_budget
 from pytest_timing.model import Run, RunInfo, TestSpan, Worker
 from pytest_timing.outputs import OUTPUTS, write_output
 from pytest_timing.render.ascii import render_ascii
 
 
+def _number(value: Any, where: str) -> None:
+    if not isinstance(value, (int, float, str)):
+        raise ValueError(f"{where} must be a number")
+    try:
+        finite = math.isfinite(float(value))
+    except OverflowError:
+        finite = False
+    if not finite:
+        raise ValueError(f"{where} must be finite")
+
+
+def _record(
+    value: Any, where: str, *, required: str = "", numbers: str = "", optional: str = ""
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{where} must be an object")
+    for key in required.split():
+        if key not in value:
+            raise ValueError(f"{where}.{key} is required")
+    for key in numbers.split():
+        if key in value:
+            _number(value[key], f"{where}.{key}")
+    for key in optional.split():
+        if value.get(key) is not None:
+            _number(value[key], f"{where}.{key}")
+    return value
+
+
+def _array(value: Any, where: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise ValueError(f"{where} must be an array")
+    return value
+
+
 def _load(path: str) -> Run:
-    return Run.from_json(Path(path).read_text("utf-8"))
+    # Check external input before model conversion. Programming errors in the
+    # model, comparison or formatter must propagate rather than becoming exit 2.
+    doc = _record(
+        json.loads(Path(path).read_text("utf-8")), "report", required="run", numbers="schema"
+    )
+    info = _record(
+        doc["run"],
+        "run",
+        required="start stop",
+        numbers="start stop",
+        optional="numprocesses exit_status",
+    )
+    if info.get("termination") is not None and not isinstance(info["termination"], str):
+        raise ValueError("run.termination must be a string")
+    _array(info.get("argv", []), "run.argv")
+    for i, value in enumerate(_array(doc.get("workers", []), "workers")):
+        _record(value, f"workers[{i}]", required="id", optional="start ready collected down items")
+    for i, value in enumerate(_array(doc.get("tests", []), "tests")):
+        where = f"tests[{i}]"
+        test = _record(
+            value,
+            where,
+            required="nodeid worker outcome start stop",
+            numbers="start stop attempt occurrence",
+        )
+        for name, phase in _record(test.get("phases", {}), f"{where}.phases").items():
+            at = f"{where}.phases.{name}"
+            if len(_array(phase, at)) != 3:
+                raise ValueError(f"{at} must contain start, stop and duration")
+            for number in phase:
+                _number(number, at)
+        for key, seconds in _record(test.get("fixtures") or {}, f"{where}.fixtures").items():
+            if seconds is not None:
+                _number(seconds, f"{where}.fixtures.{key}")
+        if test.get("cpu") is not None:
+            _record(
+                test["cpu"],
+                f"{where}.cpu",
+                numbers="elapsed work setup_work demand wait runtime_wait",
+                optional="pressure",
+            )
+        if test.get("memory") is not None:
+            _record(test["memory"], f"{where}.memory", numbers="base peak after wait")
+        for j, value in enumerate(
+            _array(test.get("admission_waits", []), f"{where}.admission_waits")
+        ):
+            at = f"{where}.admission_waits[{j}]"
+            wait = _record(value, at, required="start stop", numbers="start stop")
+            if not all(isinstance(g, str) for g in _array(wait.get("gates", []), f"{at}.gates")):
+                raise ValueError(f"{at}.gates must contain strings")
+    return Run.from_dict(doc)
 
 
 def cmd_render(args: argparse.Namespace) -> int:
@@ -22,7 +110,8 @@ def cmd_render(args: argparse.Namespace) -> int:
     for kind, output in OUTPUTS.items():
         path = getattr(args, kind)
         if path:
-            doc = doc or run.to_dict()
+            if doc is None and output.needs_doc:
+                doc = run.to_dict()
             print(write_output(output, Path(path), run, doc))
             wrote = True
     if args.ascii or not wrote:
@@ -37,6 +126,20 @@ def cmd_render(args: argparse.Namespace) -> int:
             )
         )
     return 0
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    try:
+        result = compare_runs(_load(args.before), _load(args.after), args.budget)
+        if args.json:
+            Path(args.json).write_text(
+                json.dumps(result, indent=2, allow_nan=False), encoding="utf-8"
+            )
+        print(format_comparison(result, args.top))
+        return int(result["exit_code"])
+    except (OSError, ValueError) as exc:
+        print(f"pytest-timing compare: {exc}", file=sys.stderr)
+        return 2
 
 
 def _uniquify(candidate: str, used: set[str]) -> str:
@@ -137,6 +240,22 @@ def build_parser() -> argparse.ArgumentParser:
     merge.add_argument("runs", nargs="+", help="pytest-timing JSON files")
     merge.add_argument("-o", "--output", required=True, metavar="PATH")
     merge.set_defaults(func=cmd_merge)
+    compare = sub.add_parser(
+        "compare", help="compare two saved runs and check per-test regression budgets"
+    )
+    compare.add_argument("before", help="baseline JSON run")
+    compare.add_argument("after", help="current JSON run")
+    compare.add_argument(
+        "--budget",
+        action="append",
+        type=parse_budget,
+        default=[],
+        metavar="METRIC=LIMIT",
+        help="maximum increase per common test, e.g. duration=10%%, cpu=50ms, memory=64MiB",
+    )
+    compare.add_argument("--json", metavar="PATH", help="write all differences and budget results")
+    compare.add_argument("--top", type=int, default=20, help="test details to print (default: 20)")
+    compare.set_defaults(func=cmd_compare)
     return parser
 
 

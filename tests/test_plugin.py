@@ -101,6 +101,48 @@ def test_bare_flag_keeps_selection_on_cli(suite: pytest.Pytester, kind: str) -> 
     assert (suite.path / default).exists()
 
 
+@pytest.mark.parametrize("source", ["cli", "env", "ini"])
+@pytest.mark.parametrize("value", ["light", "Light"])
+def test_light_capture_omits_optional_metrics(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, source: str, value: str
+) -> None:
+    pytester.makeconftest("""
+        import pytest_timing.plugin, pytest_timing.demand
+        def unexpected(*args, **kwargs):
+            raise AssertionError("light capture constructed an optional telemetry reader")
+        pytest_timing.plugin.ProcessTreeClock = unexpected
+        pytest_timing.demand.ProcessTreeClock = unexpected
+        pytest_timing.plugin.MemorySampler = unexpected
+    """)
+    pytester.makepyfile("""
+        import pytest
+        @pytest.fixture(scope="module")
+        def shared(): return 42
+        def test_one(shared): assert shared == 42
+    """)
+    pytester.makeini("[pytest]\ntiming_capture = " + (value if source == "ini" else "full"))
+    if source in ("cli", "env"):
+        monkeypatch.setenv("PYTEST_TIMING_CAPTURE", "full" if source == "cli" else value)
+    args = ["--timing-capture=" + value] if source == "cli" else []
+    result = pytester.runpytest_subprocess(*args, "--timing-json", "-p", "no:cacheprovider")
+    result.assert_outcomes(passed=1)
+    (test,) = load_json(pytester.path)["tests"]
+    assert "cpu" not in test and "memory" not in test
+    assert test["fixtures"] and test["phases"]["call"][2] >= 0
+
+
+def test_trace_only_plugin_does_not_build_a_json_document(pytester: pytest.Pytester) -> None:
+    pytester.makeconftest("""
+        from pytest_timing.model import Run
+        def unexpected(self): raise AssertionError("unused document")
+        Run.to_dict = unexpected
+    """)
+    pytester.makepyfile("def test_one(): pass")
+    result = pytester.runpytest_subprocess("--timing-trace", "-p", "no:cacheprovider")
+    result.assert_outcomes(passed=1)
+    assert json.loads((pytester.path / "pytest-timing.trace.json").read_text())["traceEvents"]
+
+
 def test_file_option_takes_explicit_path(suite: pytest.Pytester) -> None:
     result = suite.runpytest(
         "--timing-json-file",

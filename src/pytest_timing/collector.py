@@ -26,6 +26,7 @@ from pytest_timing.model import (
     Run,
     RunInfo,
     TestSpan,
+    WaitInterval,
     Worker,
 )
 
@@ -91,6 +92,7 @@ class Collector:
         attempt: int,
         seconds: float,
         gates: Iterable[str] = (),
+        ended: float | None = None,
     ) -> None:
         """Add an admission delay to the exact execution that waited.
 
@@ -107,6 +109,11 @@ class Collector:
             if span is None or span.outcome != "crashed" or span.phases or span.attempt != attempt:
                 return
         gates = set(gates)
+        if ended is not None:
+            stop = self._rel(ended)
+            span.admission_waits.append(
+                WaitInterval(stop - seconds, stop, tuple(sorted(gates or {"cpu"})))
+            )
         if "cpu" in gates or not gates:
             if span.cpu is None:
                 span.cpu = CpuRecord(elapsed=span.duration)

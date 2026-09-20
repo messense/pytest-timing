@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+- Keep slowest-test labels visible at the end of the timeline and wrap long labels
+  below their bars when neither side has room.
+- Add `pytest-timing compare` with per-test duration, phase, CPU and memory changes,
+  optional CI regression budgets, machine-readable JSON and explicit unavailable checks.
+- Add shared fixture costs by worker and linked time-range selection in HTML reports.
+  Zooming and scrolling resample the visible interval for finer detail.
+- Record admission wait intervals on their test attempts, preserve them through
+  merging and show them in lanes, a wait graph and range statistics.
+- Add `--timing-capture=light` to skip optional CPU and memory measurements while
+  retaining durations and resource admission; the default remains full capture.
+- Bound HTML chart samples and ticks independently of zoom, retaining peak values
+  over each bucket; cache merged-test totals and top-ten hover details.
+- Try module/class-contiguous ordering across overlapping fixture families without
+  changing worker assignments or increasing modeled CPU work.
+- Trace-only output no longer builds an unused JSON report document.
+- Runtime fixture admission no longer reserves a dynamic fixture's held CPU slots
+  or retained memory twice when it was already included in scheduling history.
+- The HTML CPU graph spreads recorded CPU time over the full test span, including
+  runtime admission waits, so the graph preserves the recorded total. Test details
+  continue to show average CPU use during execution, with those waits excluded.
+
 ## 0.3.2
 
 - The HTML report shows CPU and memory usage. The table gains "CPU time", "CPUs"

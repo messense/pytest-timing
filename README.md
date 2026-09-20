@@ -63,6 +63,7 @@ waited for. Each record identifies its measurement coverage.
 | Option | Effect |
 |---|---|
 | `--timing` | Record timings and print the ASCII chart in the terminal summary. |
+| `--timing-capture=full\|light` | Full metrics (default), or timings without CPU/memory measurement. Implies timing. |
 | `--timing-html` | Write a self-contained HTML report to `pytest-timing.html`. |
 | `--timing-json` | Write the recorded run to `pytest-timing.json`. |
 | `--timing-trace` | Write a Chrome trace file for [Perfetto](https://ui.perfetto.dev) to `pytest-timing.trace.json`. |
@@ -83,7 +84,7 @@ and schedule paths are resolved from pytest's root directory.
 
 The ini key `timing` is a boolean; `timing_html`, `timing_json` and `timing_trace`
 accept paths or `true` for the default filenames. Other ini keys are
-`timing_schedule`, `timing_cpus`, `timing_memory`, `timing_top`, `timing_min` and
+`timing_capture`, `timing_schedule`, `timing_cpus`, `timing_memory`, `timing_top`, `timing_min` and
 `timing_ascii_style`.
 Environment variables use the uppercase key prefixed by `PYTEST_`, for example
 `PYTEST_TIMING=1`, `PYTEST_TIMING_HTML=path` or `PYTEST_TIMING_CPUS=auto`.
@@ -92,6 +93,16 @@ Environment variables use the uppercase key prefixed by `PYTEST_`, for example
 For output paths, scheduling and formatting, the command line wins over the
 environment, which wins over ini. Timing is enabled if any source requests it:
 `PYTEST_TIMING=0` does not disable `timing=true` in ini or an enabled output.
+
+Use `--timing-capture=light` (or `PYTEST_TIMING_CAPTURE=light`, or
+`timing_capture = light` in ini) for timing-only collection. It keeps phase and
+shared-fixture durations, worker lifecycle and admission waits, but does not create
+a process-tree CPU reader or memory sampler. CPU work/rate, pressure and resident
+memory measurements are unavailable; wait-only records have unknown measurement
+coverage, rather than a measured zero. Declared CPU admission and memory admission
+from an existing full report still apply. Capture stays `full` unless explicitly
+changed; use full capture when refreshing resource estimates for future scheduling.
+Capture mode names are case-insensitive in CLI, environment and ini settings.
 
 ## Outputs
 
@@ -119,6 +130,10 @@ the hover details; the run's totals and budgets in the header; and CPU and memor
 usage over time. The two graphs are drawn from the per-test records, not sampled: a
 test's CPU time is spread evenly over its run, and a worker counts at its running
 test's peak, so they show where the load was rather than its exact shape.
+Each curve uses at most 4096 display samples, even at deep zoom. A sample keeps
+the maximum over its time bucket; hover reports that bucket's time range. This
+bounds display memory without dropping short peaks. Merged tiny-test bars cache
+their total duration and ten longest tests for repeated hover.
 
 **Trace** is a Chrome Trace Event file. Open it in
 [Perfetto UI](https://ui.perfetto.dev) with "Open trace file", or in `chrome://tracing`.
@@ -328,6 +343,58 @@ pytest-timing merge shard1.json shard2.json -o all.json
 
 `render` produces any of the outputs from a saved JSON run. `merge` places several runs
 (for example CI shards) on one shared time axis using their absolute start times.
+
+## Compare runs and enforce CI budgets
+
+```
+pytest-timing compare before.json after.json
+pytest-timing compare before.json after.json --budget duration=10% --budget memory=64MiB --json comparison.json
+```
+
+Comparisons match tests by node ID and show total, setup, call and teardown time,
+CPU time, and peak memory rise above the worker's baseline. For each run, only the
+final retry of each worker/occurrence is used, then repeated observations are
+combined with a median. The output includes retry counts and added/removed tests.
+Missing measurements stay unavailable, including partial coverage across repeats.
+
+A budget sets the maximum increase **per common test**. Percentages are relative
+to the baseline; a zero baseline permits no increase under a percentage budget.
+Time limits use seconds or `ms`; memory limits use bytes, `KiB`, `MiB` or `GiB`.
+Each metric accepts one budget. Added and removed tests are listed but not budgeted.
+Exit codes are `0` for success (or a comparison without budgets), `1` for exceeded
+budgets, and `2` for invalid input or unavailable checks. Budget checks need complete
+runs, at least one common test, successful final attempts and every requested metric.
+Differences in Python, pytest, worker count or distribution mode produce warnings;
+use comparable environments and repeat noisy workloads before choosing thresholds.
+
+## Explore the HTML report
+
+The scale control zooms all timelines together. Scrolling any timeline moves the
+others to the same time. Curves are resampled from the visible window, so a narrow
+peak gains detail as you zoom in, with at most 4,096 samples per curve. Hover values
+are the maximum within the displayed bucket.
+
+Enter start and end times in seconds and select **Select range** to fit that interval
+across lanes, concurrency, admission waits, CPU and memory. The test and fixture
+tables follow the selection and existing filters. **Clear range** returns to the
+whole run. The range summary covers all tests, independently of text/outcome/fixture
+filters; CPU totals integrate the original estimated curve, never its peak buckets.
+CPU time is spread evenly over each test span, while the memory curve places the
+recorded peak over that span; neither is a sampled execution trace.
+
+The shared fixture table groups recorded setup costs by fixture key and worker,
+showing repetition across tests and workers. Select a fixture to see its associated
+tests and use **Clear fixture filter** to restore them. Costs belong to overlapping
+tests: fixture setup timestamps are not recorded, so costs cannot be clipped to a
+selected interval. A `None` fixture value means reuse and contributes no setup.
+
+New reports include controller-observed `admission_waits` intervals on the exact
+test attempt that waited. Lane strips and the wait graph display those intervals;
+one interval refused by both CPU and memory counts once in the graph, summary and
+Held column (its hover still lists both gates).
+Older JSON files remain readable, but their wait totals cannot be placed on a
+timeline. Workers parked without ever running a test remain in the run-level gate
+summary rather than being assigned to an unrelated test.
 
 ## Overhead
 

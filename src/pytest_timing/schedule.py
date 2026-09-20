@@ -232,8 +232,10 @@ class Costs:
         declarations: Declarations | None = None,
     ) -> None:
         self.scope_prefixes = []
+        self.scope_owners = []
         for nodeid in collection:
             parts = nodeid.split("::")
+            self.scope_owners.append(tuple(parts[:-1]))
             directories = parts[0].split("/")[:-1]
             self.scope_prefixes.append(
                 tuple(
@@ -332,7 +334,14 @@ class Costs:
             work += setup * slots
             peak = max(peak, slots)
         pay(alive, self.family[index])
-        holds = self.hold(alive)
+        holds = memory = 0
+        resources = {}
+        for key in alive:
+            hold, kept = self.holds.get(key_base(key), 0), self.retained.get(key, 0)
+            holds += hold
+            memory += kept
+            if hold or kept:
+                resources[key] = (hold, kept)
         return Charge(
             peak=peak + holds,
             holds=holds + self.function_holds[index],
@@ -340,7 +349,8 @@ class Costs:
             work=work,
             before=before,
             after=frozenset(alive),
-            memory=self.memory[index] + self.kept_memory(alive),
+            memory=self.memory[index] + memory,
+            fixture_resources=resources,
         )
 
     def project(self, indices: Iterable[int], state: Projection | None = None) -> Projection:
@@ -374,13 +384,32 @@ class Charge:
     before: Family = NO_FIXTURES  # fixture checkpoint before dispatch
     after: Family = NO_FIXTURES
     memory: int = 0  # bytes: the test's rise plus what the fixtures alive around it keep
+    # Per-fixture contributions already included in holds/memory, copied on reconciliation.
+    fixture_resources: dict[str, tuple[int, int]] = field(default_factory=dict)
 
     def with_live_holds(self, live: int) -> int:
         """Include unexpected live holds without counting declared holds twice."""
         return self.peak + max(0, live - self.holds)
 
-    def adding_fixture(self, setup: int, hold: int, live: int) -> Charge:
-        return replace(self, peak=max(self.peak + hold, setup + live), holds=self.holds + hold)
+    def adding_fixture(self, key: str, setup: int, hold: int, live: int, memory: int = 0) -> Charge:
+        """Reconcile a runtime fixture with this test's reservation, once per identity.
+
+        History may already include it. Runtime discoveries change resource needs,
+        not the duration/work or before/after checkpoints used to transfer queued work.
+        """
+        previous_hold, previous_memory = self.fixture_resources.get(key, (0, 0))
+        extra_hold = max(0, hold - previous_hold)
+        extra_memory = max(0, memory - previous_memory)
+        return replace(
+            self,
+            peak=max(self.peak + extra_hold, setup + live),
+            holds=self.holds + extra_hold,
+            memory=self.memory + extra_memory,
+            fixture_resources={
+                **self.fixture_resources,
+                key: (previous_hold + extra_hold, previous_memory + extra_memory),
+            },
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -499,6 +528,15 @@ def plan(
         # is still left for the other workers, not at the tail.
         lane.plan.sort(key=lambda i: (not costs.family[i], -costs.slots[i], -costs.own[i]))
         lane.plan = _contiguous(costs, lane.plan)
+        # Different fixture sets may still share an expensive enclosing scope.
+        # Keep assignments intact, and accept ordering only when lane time strictly
+        # decreases without more CPU work under the transition model used for placement.
+        candidate = _scope_contiguous(costs, lane.plan)
+        if candidate != lane.plan:
+            before = lane.project(costs)
+            after = costs.project(candidate, Projection(fixtures=frozenset(lane.fixtures)))
+            if after.seconds < before.seconds - EPSILON and after.work <= before.work + EPSILON:
+                lane.plan = candidate
 
 
 def projected_finish(
@@ -515,6 +553,18 @@ def _contiguous(costs: Costs, order: list[int]) -> list[int]:
     for index in order:
         groups.setdefault(costs.family[index], []).append(index)
     return [index for members in groups.values() for index in members]
+
+
+def _scope_contiguous(costs: Costs, order: list[int]) -> list[int]:
+    """Stable enclosing module/class groups, preserving their first-seen order."""
+    ranks: dict[tuple[str, ...], int] = {}
+    keys = {}
+    for index in order:
+        owner = costs.scope_owners[index]
+        keys[index] = tuple(
+            ranks.setdefault(owner[:depth], len(ranks)) for depth in range(1, len(owner) + 1)
+        )
+    return sorted(order, key=keys.__getitem__)
 
 
 def _balance(

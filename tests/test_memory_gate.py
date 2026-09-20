@@ -113,6 +113,34 @@ def test_costs_charge_a_test_with_its_need_and_the_fixtures_alive_around_it() ->
     assert not Costs(Estimates(dict.fromkeys(ids, 1.0)), ids).any_memory
 
 
+@pytest.mark.parametrize("declared", [False, True])
+def test_runtime_fixture_resources_reconcile_without_recharging_history(declared: bool) -> None:
+    ids = ["t.py::a"]
+    key = MODULE + "[]"
+    estimates = Estimates(
+        {ids[0]: 1.0},
+        families={ids[0]: frozenset({key})},
+        setups={key: 0.1},
+        retained={key: 300 * MIB},
+    )
+    declarations = Declarations(tests=[1], fixtures={MODULE: (2, 1)} if declared else {})
+    charge = Costs(estimates, ids, declarations).charge(0, set())
+    updated = charge.adding_fixture(key, setup=2, hold=1, live=0, memory=300 * MIB)
+    assert updated.holds == 1  # even if history had timing/memory but no CPU declaration
+    assert updated.peak == (3 if declared else 2)
+    assert updated.memory == 300 * MIB
+    assert updated.adding_fixture(key, 2, 1, 0, 300 * MIB) == updated
+    assert (updated.seconds, updated.work, updated.before, updated.after) == (
+        charge.seconds,
+        charge.work,
+        charge.before,
+        charge.after,
+    )
+    # A newly discovered fixture remains separate even when its declaration matches.
+    another = updated.adding_fixture(MODULE + "_other[]", 2, 1, 1, 100 * MIB)
+    assert another.holds == 2 and another.memory == 400 * MIB
+
+
 def memory_scheduler(
     est: Estimates,
     ids: list[str],

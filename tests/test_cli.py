@@ -33,6 +33,26 @@ def test_render_outputs(run_file: Path, tmp_path: Path, capsys: pytest.CaptureFi
     assert "HTML report written" in out and "pytest-timing:" not in out
 
 
+def test_trace_only_never_builds_an_unused_document(
+    sample_run: Run, run_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pytest_timing.outputs import OUTPUTS, write_output
+    from pytest_timing.render.trace import render_trace
+
+    expected = render_trace(sample_run)
+
+    def unused(self: Run) -> dict:
+        raise AssertionError("trace must not build a JSON report document")
+
+    monkeypatch.setattr(Run, "to_dict", unused)
+    direct = tmp_path / "direct.json"
+    write_output(OUTPUTS["trace"], direct, sample_run)
+    assert direct.read_text() == expected
+    rendered = tmp_path / "rendered.json"
+    assert main(["render", str(run_file), "--trace", str(rendered)]) == 0
+    assert rendered.read_text() == render_trace(Run.from_json(run_file.read_text()))
+
+
 def test_merge_offsets_by_start_time(sample_run: Run, tmp_path: Path) -> None:
     later = shifted_copy(sample_run, 10)
     merged = merge_runs([sample_run, later], ["a", "b"])

@@ -269,10 +269,12 @@ class CpuMeter:
         clock: ProcessTreeClock | None = None,
         pressure: Pressure | None = None,
         memory: MemorySampler | None = None,
+        *,
+        measure: bool = True,
     ) -> None:
         self.timer = timer
         self.send = send
-        self.clock = clock or ProcessTreeClock()
+        self.clock = (clock or ProcessTreeClock()) if measure else None
         self.pressure = pressure or Pressure()
         self.memory = memory
         self.declarations: Declarations | None = None
@@ -353,7 +355,7 @@ class CpuMeter:
     def _await(self, key: str) -> None:
         deadline = time.monotonic() + REQUEST_TIMEOUT
         started = time.perf_counter()
-        work = self.clock.seconds()
+        work = self.clock.seconds() if self.clock is not None else 0.0
         timed_out = False
         try:
             with self._condition:
@@ -375,7 +377,8 @@ class CpuMeter:
                 self._request = None
                 self._granted = False
             self.timer.record_wait(
-                time.perf_counter() - started, max(0.0, self.clock.seconds() - work)
+                time.perf_counter() - started,
+                max(0.0, self.clock.seconds() - work) if self.clock is not None else 0.0,
             )
 
     @pytest.hookimpl(hookwrapper=True, tryfirst=True)
@@ -432,8 +435,8 @@ class CpuMeter:
         if message:
             pytest.fail(f"pytest-timing: {message}", pytrace=False)
         self._started = time.perf_counter()
-        self._work = self.clock.seconds()
-        self._throttled = self.pressure.throttled()
+        self._work = self.clock.seconds() if self.clock is not None else 0.0
+        self._throttled = self.pressure.throttled() if self.clock is not None else None
         if self.memory is not None:
             self.memory.begin()
 
@@ -458,8 +461,16 @@ class CpuMeter:
                 },
             )
         elapsed = max(0.0, time.perf_counter() - self._started - self.timer.wait)
-        work = self.clock.seconds() - self._work - self.timer.wait_work
-        throttled_now = self.pressure.throttled()
+        self._started = 0.0
+        if self.clock is None and not self.timer.wait:
+            # Admission waits can still attach an unknown-coverage record.
+            return
+        work = (
+            self.clock.seconds() - self._work - self.timer.wait_work
+            if self.clock is not None
+            else 0.0
+        )
+        throttled_now = self.pressure.throttled() if self.clock is not None else None
         throttled = (
             None
             if throttled_now is None or self._throttled is None
@@ -471,12 +482,11 @@ class CpuMeter:
             "setup_work": self.timer.setup_work,
             "runtime_wait": self.timer.wait,
             "demand": self._declared(item)[0],
-            "coverage": self.clock.coverage,
-            "pressure": self.pressure.some(),
+            "coverage": self.clock.coverage if self.clock is not None else "none",
+            "pressure": self.pressure.some() if self.clock is not None else None,
             "throttled": throttled,
         }
         setattr(outcome.get_result(), REPORT_ATTR, record)
-        self._started = 0.0
 
     def pytest_unconfigure(self) -> None:
         if self.memory is not None:

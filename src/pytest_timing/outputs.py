@@ -30,6 +30,7 @@ class Output:
     default: str  # default file name
     label: str  # how the terminal refers to it
     render: Renderer
+    needs_doc: bool = True
 
 
 OUTPUTS: dict[str, Output] = {
@@ -37,7 +38,7 @@ OUTPUTS: dict[str, Output] = {
     for o in (
         Output("html", "pytest-timing.html", "HTML report", render_html_doc),
         Output("json", "pytest-timing.json", "JSON", _render_json),
-        Output("trace", "pytest-timing.trace.json", "Chrome trace", _render_trace),
+        Output("trace", "pytest-timing.trace.json", "Chrome trace", _render_trace, needs_doc=False),
     )
 }
 
@@ -47,8 +48,8 @@ def write_output(output: Output, path: Path, run: Run, doc: dict[str, Any] | Non
 
     Pass ``doc`` (``run.to_dict()``) when writing several outputs so it is built once.
     """
-    if doc is None:
+    if doc is None and output.needs_doc:
         doc = run.to_dict()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(output.render(run, doc), encoding="utf-8")
+    path.write_text(output.render(run, doc if doc is not None else {}), encoding="utf-8")
     return f"{output.label} written to {path}"

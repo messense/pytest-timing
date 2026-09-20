@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 - Keep slowest-test labels visible at the end of the timeline and wrap long labels
   below their bars when neither side has room.

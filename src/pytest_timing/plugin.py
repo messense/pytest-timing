@@ -49,6 +49,14 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="Record test timings and print an ASCII Gantt chart in the terminal summary.",
     )
+    group.addoption(
+        "--timing-capture",
+        type=str.lower,
+        choices=("full", "light"),
+        default=None,
+        help="Capture full metrics (default), or light timings without CPU/memory measurements. "
+        "Implies --timing; declared resource admission still applies.",
+    )
     for kind, output in OUTPUTS.items():
         group.addoption(
             f"--timing-{kind}",
@@ -117,6 +125,9 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Override the terminal width used for the ASCII chart.",
     )
     parser.addini("timing", "Enable pytest-timing (same as --timing).", type="bool", default=False)
+    parser.addini(
+        "timing_capture", "Capture full metrics or light timings (implies timing).", default=""
+    )
     for kind, output in OUTPUTS.items():
         parser.addini(
             f"timing_{kind}",
@@ -192,6 +203,10 @@ class Settings:
     """Resolve values by CLI, environment, then ini; enable timing if any source asks."""
 
     def __init__(self, config: pytest.Config) -> None:
+        capture = self._value(config, "timing_capture")
+        self.capture = str(capture).lower() if capture is not None else "full"
+        if self.capture not in ("full", "light"):
+            raise pytest.UsageError("timing_capture must be 'full' or 'light'")
         self.outputs: dict[str, Path] = {}
         for kind, output in OUTPUTS.items():
             path = self._output_path(config, kind, output.default)
@@ -230,6 +245,7 @@ class Settings:
         env = os.environ.get("PYTEST_TIMING", "").lower()
         self.enabled = bool(
             config.getoption("timing", False)
+            or capture is not None
             or env in _TRUE
             or config.getini("timing")
             or self.outputs
@@ -285,8 +301,9 @@ def pytest_configure(config: pytest.Config) -> None:
         return
     # Shared fixture set-up is timed, and CPU work and memory measured, wherever
     # tests run: in every xdist worker, or here.
-    clock = ProcessTreeClock()
-    timer = FixtureTimer(work=clock.seconds)
+    measure = settings.capture == "full"
+    clock = ProcessTreeClock() if measure else None
+    timer = FixtureTimer(work=clock.seconds if clock is not None else None)
     config.pluginmanager.register(timer, "pytest_timing_fixtures")
     worker = xdist_compat.is_worker(config)
     send: Callable[[str, dict[str, Any]], None] | None = None
@@ -296,7 +313,10 @@ def pytest_configure(config: pytest.Config) -> None:
             xdist_compat.send_event(config, name, payload)
 
     config.pluginmanager.register(
-        CpuMeter(timer, send, clock, Pressure(), MemorySampler()), "pytest_timing_cpu"
+        CpuMeter(
+            timer, send, clock, Pressure(), MemorySampler() if measure else None, measure=measure
+        ),
+        "pytest_timing_cpu",
     )
     if worker:
         return  # everything else happens on the controller
@@ -681,6 +701,7 @@ class TimingPlugin:
                     wait.attempt,
                     wait.seconds,
                     wait.gates,
+                    wait.ended,
                 )
             self.collector.run.cpu = scheduler.cpu_summary()
             self.collector.run.memory = scheduler.memory_summary()
@@ -693,7 +714,8 @@ class TimingPlugin:
     def _write_outputs(self, run: Run) -> None:
         if not self.settings.outputs:
             return
-        doc = run.to_dict()  # serialised once, shared by every output
+        # Only document-based outputs need this; trace consumes the Run directly.
+        doc = run.to_dict() if any(OUTPUTS[k].needs_doc for k in self.settings.outputs) else None
         for kind, path in self.settings.outputs.items():
             output = OUTPUTS[kind]
             try:

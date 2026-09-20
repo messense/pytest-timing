@@ -46,6 +46,54 @@ def wait_for(path):
 
 
 @needs_xdist
+@pytest.mark.parametrize("scope", ["session", "module"])
+@pytest.mark.parametrize("dist", ["load", "worksteal"])
+def test_recorded_dynamic_fixture_is_reserved_once_on_replay(
+    pytester: pytest.Pytester, scope: str, dist: str
+) -> None:
+    pytester.makeconftest("""
+        import json
+        from pytest_timing.xdist_scheduler import DurationScheduling
+        original = DurationScheduling._complete_request
+        def complete(self, node):
+            def charges():
+                return {str(i): [c.peak, c.holds] for i, c in self.dispatched[node].items()}
+            before = charges()
+            reserved = self.admissions["local"].held(node)
+            original(self, node)
+            with open("requests.jsonl", "a") as out:
+                out.write(json.dumps([before, charges(), reserved]) + "\\n")
+        DurationScheduling._complete_request = complete
+    """)
+    pytester.makepyfile(f"""
+        import time, pytest, pytest_timing
+        @pytest.fixture(scope={scope!r})
+        @pytest_timing.cpu(2, hold=1)
+        def heavy():
+            time.sleep(.02)  # retained in the recorded fixture family
+            yield 42
+        def test_a(request): assert request.getfixturevalue("heavy") == 42
+        def test_b(request): assert request.getfixturevalue("heavy") == 42
+    """)
+    args = ("-n1", "--dist", dist, "--timing-cpus", "8")
+    run_timing(pytester, *args, timeout=15).assert_outcomes(passed=2)
+    history = pytester.path / "history.json"
+    history.write_text((pytester.path / "pytest-timing.json").read_text())
+    recorded = Run.from_dict(load_json(pytester.path, "history.json"))
+    assert all(len(t.fixtures) == 1 for t in recorded.tests)
+    requests = pytester.path / "requests.jsonl"
+    requests.unlink()
+    run_timing(pytester, *args, "--timing-schedule", str(history), timeout=15).assert_outcomes(
+        passed=2
+    )
+    (row,) = [json.loads(line) for line in requests.read_text().splitlines()]
+    before, after, reserved = row
+    assert sorted(before.values()) == [[2, 1], [3, 1]]
+    assert after == before  # both the setup payer and cached successor already cover it
+    assert reserved == 3  # the request must not ask for its hold a second time either
+
+
+@needs_xdist
 @pytest.mark.parametrize(
     "extra",
     [[], ["--timing-schedule", "missing.json"], ["--timing-cpus", "2", "--dist", "loadscope"]],
@@ -97,8 +145,9 @@ def test_fixture_events_work_when_another_plugin_selects_the_scheduler(
 
 @needs_xdist
 @pytest.mark.parametrize("scope", ["function", "session"])
+@pytest.mark.parametrize("capture", ["full", "light"])
 def test_runtime_setup_respects_live_function_fixture_holds(
-    pytester: pytest.Pytester, scope: str
+    pytester: pytest.Pytester, scope: str, capture: str
 ) -> None:
     pytester.makepyfile(
         EVENTS
@@ -123,10 +172,16 @@ def test_c(server, request): request.getfixturevalue("heavy")
 def test_d(server, request): request.getfixturevalue("heavy")
 """
     )
-    result = run_timing(pytester, "-n2", "--timing-cpus", "4", timeout=15)
+    result = run_timing(
+        pytester, "-n2", "--timing-cpus", "4", "--timing-capture", capture, timeout=15
+    )
     result.assert_outcomes(passed=4)
     assert event_peak(pytester) <= 4
     assert load_json(pytester.path)["run"]["cpu"]["domains"]["local"]["forced"] == 0
+    if capture == "light":
+        for test in load_json(pytester.path)["tests"]:
+            assert "memory" not in test
+            assert "cpu" not in test or test["cpu"]["coverage"] == "none"
 
 
 @needs_xdist
@@ -284,6 +339,11 @@ def test_runtime_wait_is_excluded_from_test_and_fixture_estimates(
     for test in run.tests:
         assert test.cpu is not None
         assert test.cpu.elapsed == pytest.approx(test.duration - test.cpu.runtime_wait, abs=0.02)
+        assert sum(w.stop - w.start for w in test.admission_waits) == pytest.approx(
+            test.cpu.wait, abs=0.00001
+        )
+        assert all(0 <= w.start < w.stop <= run.wall for w in test.admission_waits)
+        assert all(w.gates == ("cpu",) for w in test.admission_waits)
     if nested:
         # ``outer`` keeps only its own 40ms: not the nested 0.4s set-up, nor the
         # wait. A loaded runner stretches those 40ms to ~0.2s, hence the ceiling.

@@ -205,16 +205,25 @@ def chrome_binary() -> str | None:
     return None
 
 
-def render_in_chrome(html_path: pathlib.Path) -> str:
+def render_in_chrome(html_path: pathlib.Path, *, virtual_time: int = 0) -> str:
     """Load a report in headless Chrome and return the rendered DOM."""
     import subprocess
 
     binary = chrome_binary()
     assert binary is not None
     proc = subprocess.run(
-        [binary, "--headless", "--disable-gpu", "--no-sandbox", "--dump-dom", html_path.as_uri()],
+        [
+            binary,
+            "--headless",
+            "--disable-gpu",
+            "--no-sandbox",
+            "--dump-dom",
+            *([f"--virtual-time-budget={virtual_time}"] if virtual_time else []),
+            html_path.as_uri(),
+        ],
         capture_output=True,
         text=True,
         timeout=120,
+        check=True,
     )
     return proc.stdout

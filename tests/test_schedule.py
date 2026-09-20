@@ -24,6 +24,89 @@ DB = "session::conftest.py::db[]"
 M1 = "module:tests/test_m1.py:tests/test_m1.py::mod[]"
 
 
+@pytest.mark.parametrize("budget", [None, 2])
+def test_overlapping_families_keep_their_enclosing_modules_together(budget: int | None) -> None:
+    from pytest_timing.schedule import Costs, Lane, plan
+
+    ids = [f"m{m}.py::test_{name}" for m in range(4) for name in ("a", "b")]
+    families, setups = {}, {}
+    for m in range(4):
+        db = f"module:m{m}.py:conftest::db[]"
+        cheap = f"module:m{m}.py:conftest::cheap[]"
+        setups.update({db: 10, cheap: 0.01})
+        families[ids[2 * m]] = frozenset({db})
+        families[ids[2 * m + 1]] = frozenset({db, cheap})
+    costs = Costs(
+        Estimates(
+            {s: 4.1 if s.endswith("a") else 0.01 for s in ids}, families=families, setups=setups
+        ),
+        ids,
+    )
+    lanes = [Lane(), Lane()]
+    plan(costs, range(8), lanes, budget)
+    assert sorted(i for lane in lanes for i in lane.plan) == list(range(8))
+    assert max(lane.project(costs).seconds for lane in lanes) == pytest.approx(28.24)
+    for lane in lanes:
+        modules = [ids[i].split("::")[0] for i in lane.plan]
+        assert modules[0] == modules[1] and modules[2] == modules[3]
+
+
+def test_scope_grouping_does_not_replace_cheaper_parameter_locality() -> None:
+    from pytest_timing.schedule import Costs, Lane, plan
+
+    ids = ["a.py::test_0", "b.py::test_0", "a.py::test_1", "b.py::test_1"]
+    keys = ["session::conftest::db[0]", "session::conftest::db[1]"]
+    costs = Costs(
+        Estimates(
+            dict.fromkeys(ids, 1),
+            families={s: frozenset({keys[i // 2]}) for i, s in enumerate(ids)},
+            setups=dict.fromkeys(keys, 10),
+        ),
+        ids,
+    )
+    lane = Lane()
+    plan(costs, range(4), [lane])
+    assert lane.project(costs).seconds == 24  # grouping by module instead would cost 44
+
+
+@needs_xdist
+def test_recorded_overlapping_module_fixtures_are_not_repeated(
+    pytester: pytest.Pytester,
+) -> None:
+    from conftest import run_timing
+
+    pytester.makeconftest("""
+        import time, pytest
+        @pytest.fixture(scope="module")
+        def db(request):
+            time.sleep(.1)
+            with open(request.module.__name__ + ".setups", "a") as out: out.write("setup\\n")
+        @pytest.fixture(scope="module")
+        def cheap(): time.sleep(.003)
+    """)
+    pytester.makepyfile(
+        **{
+            f"test_m{i}": """
+        import time
+        def test_a(db): time.sleep(.041)
+        def test_b(db, cheap): time.sleep(.001)
+    """
+            for i in range(4)
+        }
+    )
+    run_timing(pytester, "-n1", timeout=15).assert_outcomes(passed=8)
+    history = pytester.path / "history.json"
+    history.write_text((pytester.path / "pytest-timing.json").read_text())
+    for path in pytester.path.glob("*.setups"):
+        path.unlink()
+    # A single worker isolates ordering from balancing and runtime transfers,
+    # which may legitimately split a module or revisit it on the same worker.
+    run_timing(pytester, "-n1", "--timing-schedule", str(history), timeout=15).assert_outcomes(
+        passed=8
+    )
+    assert sum(len(path.read_text().splitlines()) for path in pytester.path.glob("*.setups")) == 4
+
+
 def _run_with(*tests: tuple[str, float, str]) -> Any:
     c = Collector(make_info())
     at = 0.0
@@ -346,6 +429,7 @@ def make_scheduler(
 
     sched = DurationScheduling(FakeConfig(workers, **kwargs), None, estimates, stealing, cpu)  # type: ignore[arg-type]
     sched.clock = lambda: sched.now
+    sched.epoch_clock = lambda: 1_700_000_000 + sched.now
     sched.now = 0.0
     return sched
 
@@ -398,6 +482,48 @@ def test_worker_that_runs_dry_takes_from_another_plan() -> None:
     sched.now = 6.0
     sched.mark_test_complete(gw0, ids.index("a"))
     assert gw0.shutting_down
+
+
+@needs_xdist
+def test_tail_transfer_charges_for_reentered_module() -> None:
+    ids = [f"m{m}.py::test_{name}" for m in range(4) for name in ("a", "b")]
+    families, setups = {}, {}
+    for m, db_seconds, cheap_seconds in (
+        (0, 0.120, 0.005),
+        (1, 0.117, 0.006),
+        (2, 0.129, 0.010),
+        (3, 0.100, 0.003),
+    ):
+        db = f"module:m{m}.py:conftest::db[]"
+        cheap = f"module:m{m}.py:conftest::cheap[]"
+        setups.update({db: db_seconds, cheap: cheap_seconds})
+        families[ids[2 * m]] = frozenset({db})
+        families[ids[2 * m + 1]] = frozenset({db, cheap})
+    sched = make_scheduler(
+        Estimates(
+            dict(zip(ids, (0.042, 0.006, 0.102, 0.029, 0.050, 0.015, 0.041, 0.016), strict=True)),
+            families=families,
+            setups=setups,
+        )
+    )
+    gw0, gw1 = start(sched, ids)
+    assert gw0.queued + sched.lanes[gw0].plan == [2, 6, 7, 5]
+    assert gw1.queued + sched.lanes[gw1].plan == [4, 0, 1, 3]
+
+    # gw1 leaves m2, then takes m2::test_b from gw0's tail. The extra setup
+    # still improves the predicted finish (0.814 -> 0.806 seconds).
+    for now, node, index in ((0.205, gw1, 4), (0.290, gw0, 2), (0.471, gw1, 0)):
+        sched.now = now
+        sched.mark_test_complete(node, index)
+    assert sched.lanes[gw0].plan == [5]
+    sched.now = 0.500
+    sched.mark_test_complete(gw1, 1)
+    assert gw1.queued == [4, 0, 1, 3, 5]
+    assert sched.lanes[gw0].plan == []
+    charge = sched.dispatched[gw1][5]
+    assert charge.seconds == pytest.approx(0.015 + 0.129 + 0.010)
+    assert charge.work == pytest.approx(charge.seconds)
+    assert sorted(gw0.queued + gw1.queued) == list(range(8))
 
 
 @needs_xdist
@@ -966,6 +1092,7 @@ def test_shutdown_waits_for_the_last_test_to_be_admitted() -> None:
     assert admission.held(runner) == 0
     assert waiter not in sched.waiting
     (record,) = sched.waits
+    assert record.ended == 1_700_000_001
     assert (record.worker, record.index, record.attempt, record.seconds) == (
         waiter.gateway.id,
         waiter.queued[0],
@@ -1375,6 +1502,7 @@ def test_forced_runtime_admission_keeps_attempt_identity_and_waits_for_completio
     assert gw1 in sched.requests and not gw1.commands
     (wait,) = sched.waits
     assert (wait.worker, wait.index, wait.attempt, wait.seconds) == ("gw0", 0, 1, 5)
+    assert wait.ended == 1_700_000_005
     sched.update_holds(gw0, 0)  # finalizers ended, the protocol is still busy
     sched._admit_waiting()
     assert not gw1.commands and admission.forced == 1

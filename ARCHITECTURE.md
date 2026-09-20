@@ -11,9 +11,10 @@ schedules a run from the previous one. For usage, see the [README](README.md).
 | `collector.py` | Folds phase reports and worker events into a `Run`. Knows nothing about pytest objects. |
 | `model.py` | The recorded run: `Run`, `Worker`, `TestSpan`, `Phase`, and the JSON representation. |
 | `outputs.py` | The ASCII, HTML and trace renderers, in one table shared by the plugin and the CLI. |
-| `cli.py` | `pytest-timing render` and `pytest-timing merge`. |
+| `cli.py` | `pytest-timing render`, `merge` and `compare`. |
 | `fixtures.py` | Times shared fixture set-up where tests run and lists dependencies on reports. |
 | `schedule.py` | Duration estimates, the fixture-aware cost model and the planner. Free of xdist. |
+| `compare.py` | Saved-run comparison, final-attempt aggregation and per-test CI budgets. Free of pytest hooks and output I/O. |
 | `demand.py` | Declared CPU demand: the `timing_cpu` marker, the fixture decorator, the declarations a worker sends, and the meter that records each test's CPU work and resident memory. |
 | `admission.py` | One host's CPU budget, reservations, fair waiting line and pressure feedback. Free of xdist and platform reads. |
 | `telemetry.py` | Platform reads: affinity and cgroup quota, CPU time and resident memory of a process tree, pressure and throttling. |
@@ -97,6 +98,14 @@ A missing or unreadable history file leaves xdist's scheduler in place unless an
 explicit CPU budget was requested. With that budget the custom scheduler still runs,
 using equal 1 ms test estimates. It supports only `load` and `worksteal`.
 
+## Saved-run comparisons
+
+Saved-run comparisons use a separate policy from scheduling estimates: compare
+the median of final attempts, preserving missing metrics and rejecting incomplete
+budget checks. Scheduling may choose uncontended historical observations instead.
+Keeping these policies separate avoids treating a failed or missing observation as
+a successful CI check merely because it was usable for queue planning.
+
 ## Cost model
 
 A shared fixture makes the cost of a test depend on the worker. Every test has a
@@ -118,10 +127,16 @@ CPU work, peak demand and fixture transition. `Costs.project` folds these into a
 
 The scheduler keeps one `Charge` per dispatched item. It records the holds already
 included in the peak, so actual live holds supplement it without double counting.
+It also records each fixture's contribution to CPU holds and retained memory.
+Runtime admission previews and commits the same reconciliation: a fixture already
+covered by history adds only a missing contribution, never its full cost again.
 Charged duration, CPU work and the pre-dispatch fixture checkpoint remain historical
 facts even when a runtime request changes the reservation. Stealing refunds the same
 record and restores that checkpoint.
 Ordinary transfers and steals compare finish times with the same CPU-work floor.
+After placement, a stable module/class grouping is also tried within each worker's
+assignment. It replaces exact-family ordering only when `Costs.project` predicts
+less lane time and no more CPU work, so parameter locality can still win.
 
 ## Planning
 
@@ -364,6 +379,11 @@ as `runtime_wait`. All open fixture clocks pause during that wait, and test esti
 subtract it along with shared setup. CPU `elapsed` and `work` exclude the wait and
 its process-tree CPU work, so the measured rate covers execution. Older records
 without `runtime_wait` default to zero; pre-start waits are not subtracted again.
+The controller also attaches each wait's end epoch and monotonic duration as an
+optional `TestSpan.admission_waits` interval on the run axis. Model rebasing moves
+these intervals with phases and test spans. The HTML report displays them once
+even when both gates refused the same interval. Older totals without intervals stay
+unlocated; parked workers without an executed item are only in gate summaries.
 Event handlers are registered before each worker starts, even when another plugin
 selects the scheduler: without an admission gate a request is granted immediately.
 The cgroup quota behind `auto` is read from the process's own group, walking up to

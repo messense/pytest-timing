@@ -264,6 +264,22 @@ class MemoryRecord:
 
 
 @dataclass(slots=True)
+class WaitInterval:
+    """A controller-observed admission interval, relative to the run's epoch."""
+
+    start: float
+    stop: float
+    gates: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"start": _round(self.start), "stop": _round(self.stop), "gates": list(self.gates)}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> WaitInterval:
+        return cls(float(data["start"]), float(data["stop"]), tuple(data.get("gates", ())))
+
+
+@dataclass(slots=True)
 class TestSpan:
     """One attempt at running one test occurrence on one worker.
 
@@ -284,6 +300,7 @@ class TestSpan:
     fixtures: dict[str, float | None] = field(default_factory=dict)
     cpu: CpuRecord | None = None
     memory: MemoryRecord | None = None
+    admission_waits: list[WaitInterval] = field(default_factory=list)
 
     @property
     def duration(self) -> float:
@@ -304,6 +321,10 @@ class TestSpan:
             start=self.start + seconds,
             stop=self.stop + seconds,
             phases={k: p.shifted(seconds) for k, p in self.phases.items()},
+            admission_waits=[
+                WaitInterval(w.start + seconds, w.stop + seconds, w.gates)
+                for w in self.admission_waits
+            ],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -323,6 +344,8 @@ class TestSpan:
             doc["cpu"] = self.cpu.to_dict()
         if self.memory is not None:
             doc["memory"] = self.memory.to_dict()
+        if self.admission_waits:
+            doc["admission_waits"] = [w.to_dict() for w in self.admission_waits]
         return doc
 
     @classmethod
@@ -348,6 +371,7 @@ class TestSpan:
             },
             cpu=CpuRecord.from_dict(dict(cpu)) if isinstance(cpu, dict) else None,
             memory=MemoryRecord.from_dict(dict(memory)) if isinstance(memory, dict) else None,
+            admission_waits=[WaitInterval.from_dict(w) for w in data.get("admission_waits", ())],
         )
 
 

@@ -61,6 +61,35 @@ def test_phases_fold_into_one_span() -> None:
     assert run.run.stop == T0 + 5
 
 
+def test_wait_intervals_keep_execution_identity_and_survive_merge() -> None:
+    from pytest_timing.cli import merge_runs
+    from pytest_timing.model import WaitInterval
+
+    collector = Collector(make_info())
+    for attempt in (0, 1):
+        for when in ("setup", "call", "teardown"):
+            phase = report("test.py::retry", when, attempt + 1, attempt + 1.5)
+            phase.execution = (4, attempt)
+            phase.outcome = "rerun" if attempt == 0 and when == "call" else "passed"
+            collector.add_report(phase)
+    collector.add_wait("gw0", "test.py::retry", 4, 0, 0.25, {"cpu", "memory"}, T0 + 1.25)
+    collector.add_wait("gw0", "test.py::retry", 4, 1, 0.1, {"cpu"}, T0 + 2.2)
+    result = collector.finish(T0 + 4, termination="finished")
+    restored = Run.from_json(result.to_json())
+    assert restored.tests[0].admission_waits == [WaitInterval(1, 1.25, ("cpu", "memory"))]
+    assert restored.tests[1].admission_waits == [WaitInterval(2.1, 2.2, ("cpu",))]
+    assert restored.tests[0].cpu is not None and restored.tests[0].cpu.wait == 0.25
+    early = Collector(make_info(start=T0 - 10)).finish(T0, termination="finished")
+    merged = merge_runs([early, restored], ["early", "later"])
+    assert merged.tests[0].admission_waits == [WaitInterval(11, 11.25, ("cpu", "memory"))]
+    assert merged.tests[1].admission_waits == [WaitInterval(12.1, 12.2, ("cpu",))]
+    # Older schema-1 reports have totals only; do not fabricate a placement.
+    doc = restored.to_dict()
+    for test in doc["tests"]:
+        del test["admission_waits"]
+    assert all(not t.admission_waits for t in Run.from_dict(doc).tests)
+
+
 def test_outcomes() -> None:
     c = Collector(make_info())
     full_test(c, "t.py::fail", 0, outcome="failed")

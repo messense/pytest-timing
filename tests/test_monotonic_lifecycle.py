@@ -70,4 +70,5 @@ def test_controller_wall_clock_step(pytester: pytest.Pytester, workers: int, ste
         assert 0 <= worker["start"] <= worker["ready"] <= worker["collected"]
         assert worker["collected"] <= worker["down"] <= duration + 1e-5
     for test in run["tests"]:
-        assert 0 <= test["start"] <= test["stop"] <= duration + 1e-5
+        # Pytest's wall-clock phase stamps may be coarser than the controller clock.
+        assert 0 <= test["start"] <= test["stop"] <= duration + 0.1

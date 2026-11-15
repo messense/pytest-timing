@@ -73,6 +73,24 @@ def format_seconds(seconds: float) -> str:
     return f"{int(hours)}h{int(minutes):02d}m"
 
 
+def _render_workers(run: Run) -> str:
+    """Show lifecycle observations without inventing per-test activity."""
+    lines = [
+        f"pytest-timing: worker lifecycle capture, {len(run.workers)} workers, "
+        f"wall {format_seconds(run.wall)}",
+        "worker | start | ready | collected | down | items | error",
+    ]
+    for worker in run.workers:
+        times = [
+            "-" if value is None else f"{value:.6f}s"
+            for value in (worker.start, worker.ready, worker.collected, worker.down)
+        ]
+        items = "-" if worker.items is None else str(worker.items)
+        lines.append(" | ".join([worker.id, *times, items, worker.error or "-"]))
+    lines.append(f"session: {run.run.termination}, exit status {run.run.exit_status}")
+    return "\n".join(lines)
+
+
 def render_ascii(
     run: Run,
     *,
@@ -82,6 +100,8 @@ def render_ascii(
     style: str = "unicode",
     color: bool = False,
 ) -> str:
+    if run.run.workers_only:
+        return _render_workers(run)
     glyphs = STYLES.get(style, STYLES["unicode"])
     lanes = run.lanes()
     label_width = max([len(lane.id) for lane in lanes] + [6])

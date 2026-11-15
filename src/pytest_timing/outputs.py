@@ -48,6 +48,8 @@ def write_output(output: Output, path: Path, run: Run, doc: dict[str, Any] | Non
 
     Pass ``doc`` (``run.to_dict()``) when writing several outputs so it is built once.
     """
+    if run.run.workers_only and output.kind != "json":
+        raise ValueError("workers capture supports JSON output only")
     if doc is None and output.needs_doc:
         doc = run.to_dict()
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -443,6 +443,7 @@ class RunInfo:
     numprocesses: int | None = None
     cpu: dict[str, Any] | None = None  # hosts, budget and admission summary
     memory: dict[str, Any] | None = None  # the memory budget and its admission summary
+    workers_only: bool = False  # test activity was deliberately not captured
 
     @property
     def wall(self) -> float:
@@ -458,7 +459,7 @@ class RunInfo:
         return TERMINATION_REGISTRY[self.termination].label
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "start": self.start,
             "stop": self.stop,
             "termination": self.termination,
@@ -475,6 +476,9 @@ class RunInfo:
             "cpu": self.cpu,
             "memory": self.memory,
         }
+        if self.workers_only:
+            data["workers_only"] = True
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RunInfo:
@@ -486,6 +490,9 @@ class RunInfo:
                 f"run has no valid termination (got {termination!r}); "
                 f"expected one of {', '.join(TERMINATIONS)}"
             )
+        workers_only = data.get("workers_only", False)
+        if not isinstance(workers_only, bool):
+            raise ValueError("run.workers_only must be a boolean")
         return cls(
             start=float(data["start"]),
             stop=float(data["stop"]),
@@ -501,6 +508,7 @@ class RunInfo:
             numprocesses=None if numprocesses is None else int(numprocesses),
             cpu=dict(data["cpu"]) if isinstance(data.get("cpu"), dict) else None,
             memory=dict(data["memory"]) if isinstance(data.get("memory"), dict) else None,
+            workers_only=workers_only,
         )
 
 

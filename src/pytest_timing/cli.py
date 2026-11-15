@@ -163,6 +163,9 @@ def merge_runs(runs: list[Run], names: list[str]) -> Run:
         raise ValueError("nothing to merge")
     if len(names) != len(runs):
         raise ValueError("one name per run is required")
+    workers_only = [run.run.workers_only for run in runs]
+    if any(workers_only) and not all(workers_only):
+        raise ValueError("cannot merge worker-only and per-test capture")
     base = min(r.run.start for r in runs)
     first = runs[0].run
     info = RunInfo(
@@ -178,6 +181,7 @@ def merge_runs(runs: list[Run], names: list[str]) -> Run:
         xdist=first.xdist,
         dist=first.dist,
         numprocesses=sum(r.run.numprocesses or 0 for r in runs) or None,
+        workers_only=first.workers_only,
     )
     distinct = {w for r in runs for w in r.worker_ids()}
     collide = len(distinct) < sum(len(r.worker_ids()) for r in runs)

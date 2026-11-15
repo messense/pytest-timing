@@ -63,7 +63,7 @@ waited for. Each record identifies its measurement coverage.
 | Option | Effect |
 |---|---|
 | `--timing` | Record timings and print the ASCII chart in the terminal summary. |
-| `--timing-capture=full\|light` | Full metrics (default), or timings without CPU/memory measurement. Implies timing. |
+| `--timing-capture=full\|light\|workers` | Full metrics (default), light timings without CPU/memory measurement, or worker lifecycle only. Implies timing. |
 | `--timing-html` | Write a self-contained HTML report to `pytest-timing.html`. |
 | `--timing-json` | Write the recorded run to `pytest-timing.json`. |
 | `--timing-trace` | Write a Chrome trace file for [Perfetto](https://ui.perfetto.dev) to `pytest-timing.trace.json`. |
@@ -103,6 +103,20 @@ coverage, rather than a measured zero. Declared CPU admission and memory admissi
 from an existing full report still apply. Capture stays `full` unless explicitly
 changed; use full capture when refreshing resource estimates for future scheduling.
 Capture mode names are case-insensitive in CLI, environment and ini settings.
+
+Use `--timing-capture=workers` for compact controller-observed worker lifecycle
+telemetry. It records worker identity, startup/readiness/collection/shutdown,
+worker errors, and session termination without installing test, fixture, CPU,
+or memory instrumentation. The selected xdist scheduler is unchanged. Without
+xdist, the single `main` lane records the session lifecycle.
+
+The terminal shows lifecycle timestamps without test counts or busy percentages.
+`--timing-json` writes the existing run format with `run.workers_only = true`
+and an empty `tests` array. Output grows with worker count rather than collected
+test count. JSON files can be merged with other worker-only runs and rendered
+as terminal lifecycle summaries. HTML/trace output, per-test comparisons, and
+scheduling/resource admission are unavailable in this mode. Incompatible
+capture options raise a usage error rather than silently disabling a budget.
 
 ## Outputs
 

@@ -327,6 +327,8 @@ class TimingPlugin:
     def __init__(self, config: pytest.Config, settings: Settings) -> None:
         self.config = config
         self.settings = settings
+        self._epoch_origin = time.time()
+        self._monotonic_origin = time.perf_counter()
         self.collector = Collector(self._run_info())
         self.result: Run | None = None
         self.written: list[str] = []
@@ -344,10 +346,18 @@ class TimingPlugin:
     def distributed(self) -> bool:
         return xdist_compat.is_distributed(self.config)
 
+    def _now(self) -> float:
+        """Project monotonic controller time onto the run's epoch coordinate.
+
+        Collectors and test reports keep their existing epoch origin; a
+        controller wall-clock adjustment must not change elapsed intervals.
+        """
+        return self._epoch_origin + (time.perf_counter() - self._monotonic_origin)
+
     def _run_info(self) -> RunInfo:
         config = self.config
         return RunInfo(
-            start=time.time(),
+            start=self._epoch_origin,
             stop=0.0,
             argv=list(config.invocation_params.args),
             rootdir=str(config.rootpath),
@@ -372,14 +382,14 @@ class TimingPlugin:
                 self.schedule_note = "schedule: needs pytest-xdist workers (-n); not applied"
             elif self.settings.cpus is not None or self.settings.memory is not None:
                 self.schedule_note = "cpu: a budget needs pytest-xdist workers (-n); not applied"
-            now = time.time()
+            now = self._now()
             self.collector.worker_started(MAIN_LANE, self.collector.run.start)
             self.collector.worker_ready(MAIN_LANE, now)
 
     @pytest.hookimpl(trylast=True)
     def pytest_collection_finish(self, session: pytest.Session) -> None:
         if not self.distributed:
-            self.collector.worker_collected(MAIN_LANE, time.time(), len(session.items))
+            self.collector.worker_collected(MAIN_LANE, self._now(), len(session.items))
 
     def pytest_collectreport(self, report: Any) -> None:
         if self.distributed:
@@ -423,7 +433,7 @@ class TimingPlugin:
     def pytest_xdist_setupnodes(self) -> None:
         """Before any gateway exists: time each creation as it happens."""
         self._stop_observing = xdist_compat.observe_gateway_creation(
-            self.config, self.collector.worker_started
+            self.config, self.collector.worker_started, clock=self._now
         )
         if self._stop_observing is not None:
             # Also at unconfigure: a failed worker start-up never reaches sessionfinish.
@@ -488,22 +498,22 @@ class TimingPlugin:
         """Fallback when the creation call could not be observed: the gateway exists
         now, and nothing earlier is known."""
         if self._stop_observing is None:
-            self.collector.worker_started(xdist_compat.gateway_id(gateway), time.time())
+            self.collector.worker_started(xdist_compat.gateway_id(gateway), self._now())
 
     @pytest.hookimpl(optionalhook=True)
     def pytest_testnodeready(self, node: Any) -> None:
-        self.collector.worker_ready(xdist_compat.node_id(node), time.time())
+        self.collector.worker_ready(xdist_compat.node_id(node), self._now())
 
     @pytest.hookimpl(optionalhook=True)
     def pytest_xdist_node_collection_finished(self, node: Any, ids: Any) -> None:
         worker = xdist_compat.node_id(node)
         self._collections.collected(worker, ids)
-        self.collector.worker_collected(worker, time.time(), len(ids))
+        self.collector.worker_collected(worker, self._now(), len(ids))
 
     @pytest.hookimpl(optionalhook=True)
     def pytest_testnodedown(self, node: Any, error: object) -> None:
         message = None if error is None else str(error)
-        self.collector.worker_down(xdist_compat.node_id(node), time.time(), message)
+        self.collector.worker_down(xdist_compat.node_id(node), self._now(), message)
         if error is None and self.scheduler is not None:
             self.scheduler.worker_finished(node)
 
@@ -661,7 +671,7 @@ class TimingPlugin:
                 worker=xdist_compat.worker_id(report) or MAIN_LANE,
                 wasxfail=hasattr(report, "wasxfail"),
                 # Receipt time is only needed when the report carries no clock of its own.
-                received=time.time() if not (start and stop) else 0.0,
+                received=self._now() if not (start and stop) else 0.0,
                 fixtures=getattr(report, REPORT_ATTR, None),
                 cpu=cpu,
                 memory=getattr(report, MEMORY_ATTR, None),
@@ -680,7 +690,7 @@ class TimingPlugin:
     @pytest.hookimpl(trylast=True)
     def pytest_sessionfinish(self, session: pytest.Session, exitstatus: int) -> None:
         self._stop_observing_now()
-        now = time.time()
+        now = self._now()
         if not self.distributed:
             self.collector.worker_down(MAIN_LANE, now, None)
         termination, reason = self._termination(session)

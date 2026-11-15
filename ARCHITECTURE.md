@@ -23,6 +23,12 @@ schedules a run from the previous one. For usage, see the [README](README.md).
 
 ## Capturing timings
 
+Controller lifecycle observations and session elapsed time use a monotonic
+clock anchored to the run's epoch start. This keeps lifecycle offsets stable
+when the controller's wall clock changes, while preserving the epoch coordinate
+used by the collector and pytest's reported test-phase timestamps. Phase
+timestamps themselves remain those supplied by pytest.
+
 Since pytest 7.3 every `TestReport` carries wall-clock `start` and `stop` timestamps.
 xdist serialises reports to the controller unchanged and attaches the worker to each,
 so phase aggregation uses controller-side hooks: `pytest_runtest_logreport` for the

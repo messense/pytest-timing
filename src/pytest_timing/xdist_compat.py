@@ -55,7 +55,10 @@ HOLDS = "timing_holds"
 
 
 def observe_gateway_creation(
-    config: pytest.Config, on_created: Callable[[str, float], None]
+    config: pytest.Config,
+    on_created: Callable[[str, float], None],
+    *,
+    clock: Callable[[], float] | None = None,
 ) -> Callable[[], None] | None:
     """Time every gateway creation on the controller's execnet group.
 
@@ -77,7 +80,7 @@ def observe_gateway_creation(
     previous = group.__dict__.get("makegateway", _ABSENT)
 
     def makegateway(*args: Any, **kwargs: Any) -> Any:
-        started = time.time()
+        started = (clock or time.time)()
         gateway = original(*args, **kwargs)
         on_created(gateway_id(gateway), started)
         return gateway

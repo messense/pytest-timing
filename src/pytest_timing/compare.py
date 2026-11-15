@@ -87,6 +87,8 @@ def _tests(run: Run) -> dict[str, dict[str, Any]]:
 
 
 def compare_runs(before: Run, after: Run, budgets: list[Budget] | None = None) -> dict[str, Any]:
+    if before.run.workers_only or after.run.workers_only:
+        raise ValueError("per-test comparisons require full or light capture")
     budgets = budgets or []
     if len({b.metric for b in budgets}) != len(budgets):
         raise ValueError("specify at most one budget per metric")

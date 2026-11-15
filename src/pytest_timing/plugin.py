@@ -52,10 +52,10 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     group.addoption(
         "--timing-capture",
         type=str.lower,
-        choices=("full", "light"),
+        choices=("full", "light", "workers"),
         default=None,
-        help="Capture full metrics (default), or light timings without CPU/memory measurements. "
-        "Implies --timing; declared resource admission still applies.",
+        help="Capture full metrics (default), light timings without CPU/memory measurements, "
+        "or worker lifecycle only. Implies --timing.",
     )
     for kind, output in OUTPUTS.items():
         group.addoption(
@@ -126,7 +126,9 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
     parser.addini("timing", "Enable pytest-timing (same as --timing).", type="bool", default=False)
     parser.addini(
-        "timing_capture", "Capture full metrics or light timings (implies timing).", default=""
+        "timing_capture",
+        "Capture full metrics, light timings, or worker lifecycle only.",
+        default="",
     )
     for kind, output in OUTPUTS.items():
         parser.addini(
@@ -205,8 +207,8 @@ class Settings:
     def __init__(self, config: pytest.Config) -> None:
         capture = self._value(config, "timing_capture")
         self.capture = str(capture).lower() if capture is not None else "full"
-        if self.capture not in ("full", "light"):
-            raise pytest.UsageError("timing_capture must be 'full' or 'light'")
+        if self.capture not in ("full", "light", "workers"):
+            raise pytest.UsageError("timing_capture must be 'full', 'light', or 'workers'")
         self.outputs: dict[str, Path] = {}
         for kind, output in OUTPUTS.items():
             path = self._output_path(config, kind, output.default)
@@ -230,6 +232,13 @@ class Settings:
         self.memory: int | Literal["auto"] | None = (
             parse_memory(str(memory)) if memory is not None else None
         )
+        if self.capture == "workers":
+            if self.schedule is not None or self.cpus is not None or self.memory is not None:
+                raise pytest.UsageError(
+                    "workers capture cannot be combined with scheduling or resource admission"
+                )
+            if any(kind != "json" for kind in self.outputs):
+                raise pytest.UsageError("workers capture supports JSON output only")
         top = self._value(config, "timing_top")
         self.top = int(top) if top is not None else DEFAULT_TOP
         minimum = self._value(config, "timing_min")
@@ -299,6 +308,10 @@ def pytest_configure(config: pytest.Config) -> None:
     settings = Settings(config)
     if not settings.enabled:
         return
+    if settings.capture == "workers":
+        if not xdist_compat.is_worker(config):
+            config.pluginmanager.register(TimingPlugin(config, settings), "pytest_timing")
+        return
     # Shared fixture set-up is timed, and CPU work and memory measured, wherever
     # tests run: in every xdist worker, or here.
     measure = settings.capture == "full"
@@ -354,6 +367,7 @@ class TimingPlugin:
             python=platform.python_version(),
             pytest=pytest.__version__,
             xdist=xdist_compat.version() if config.pluginmanager.hasplugin("xdist") else None,
+            workers_only=self.settings.capture == "workers",
         )
 
     @pytest.hookimpl(tryfirst=True)
@@ -432,6 +446,8 @@ class TimingPlugin:
     @pytest.hookimpl(optionalhook=True)
     def pytest_configure_node(self, node: Any) -> None:
         """Before the worker starts: take its CPU declarations off its channel."""
+        if self.settings.capture == "workers":
+            return
         worker = xdist_compat.node_id(node)
         # Register before forwarding anything. Another plugin can select the
         # scheduler without ever calling our first-result make_scheduler hook.
@@ -646,6 +662,8 @@ class TimingPlugin:
         return line
 
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
+        if self.settings.capture == "workers":
+            return
         # Called three times per test: keep it to attribute reads and one object.
         cpu = getattr(report, CPU_ATTR, None)
         start = getattr(report, "start", 0.0)
@@ -691,6 +709,8 @@ class TimingPlugin:
 
     def _record_cpu(self) -> None:
         """Admission waits onto their spans, and the CPU environment onto the run."""
+        if self.settings.capture == "workers":
+            return
         scheduler = self.scheduler
         if scheduler is not None and scheduler.collection is not None:
             for wait in scheduler.waits:
